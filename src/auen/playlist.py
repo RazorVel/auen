@@ -132,6 +132,16 @@ class Playlist:
         with self._lock:
             self._history.clear()
 
+    def restore(self, queue: Iterable[Track], history: Iterable[Track]) -> None:
+        """Atomically replace queue and history from a persisted session."""
+        with self._lock:
+            self._queue = deque(queue)
+            self._history = list(history)
+            if self._queue:
+                self._available.set()
+            else:
+                self._available.clear()
+
     @property
     def queue_list(self) -> list[Track]:
         with self._lock:

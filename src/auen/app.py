@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, ClassVar
 
-from textual import on
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, Switch
+from textual.widgets import (
+    Button,
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    Label,
+    Select,
+    Static,
+    Switch,
+)
 
 from auen.config import AuenConfig
-from auen.models import RepeatMode, SessionMode
+from auen.models import RepeatMode, SessionMode, Track
+from auen.session import AuenSession
 
 if TYPE_CHECKING:
     from textual.binding import BindingType
@@ -57,7 +69,7 @@ class SessionModeScreen(ModalScreen[SessionMode]):
             self.dismiss(SessionMode.STREAM_AND_CACHE)
 
 
-class SettingsScreen(Screen[None]):
+class SettingsScreen(Screen[bool]):
     """Keyboard-friendly settings editor shared with the CLI configuration."""
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -181,7 +193,7 @@ class SettingsScreen(Screen[None]):
             yield Switch(value=value, id=widget_id)
 
     def action_cancel(self) -> None:
-        self.app.pop_screen()
+        self.dismiss(False)
 
     def action_save(self) -> None:
         try:
@@ -192,7 +204,7 @@ class SettingsScreen(Screen[None]):
             return
 
         self.notify(f"Saved to {path}", title="Settings saved")
-        self.app.pop_screen()
+        self.dismiss(True)
 
     @on(Button.Pressed, "#cancel")
     def cancel_pressed(self) -> None:
@@ -235,6 +247,8 @@ class AuenApp(App[None]):
     SUB_TITLE = "terminal audio"
     BINDINGS: ClassVar[list[BindingType]] = [
         ("/", "focus_search", "Search"),
+        ("d", "download_selected", "Save offline"),
+        ("delete", "remove_queued", "Remove queued"),
         ("f2", "settings", "Settings"),
         ("q", "quit", "Quit"),
     ]
@@ -261,6 +275,9 @@ class AuenApp(App[None]):
         text-style: bold;
         margin-bottom: 1;
     }
+    DataTable {
+        height: 1fr;
+    }
     #now-playing {
         dock: bottom;
         height: 3;
@@ -269,10 +286,18 @@ class AuenApp(App[None]):
     }
     """
 
-    def __init__(self, config: AuenConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: AuenConfig | None = None,
+        *,
+        session: AuenSession | None = None,
+    ) -> None:
         super().__init__()
         self.config = config or AuenConfig.load()
+        self.session = session or AuenSession(self.config)
         self.current_session_mode = SessionMode(self.config.session_mode)
+        self.search_results: dict[str, Track] = {}
+        self._result_order: list[Track] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -280,16 +305,89 @@ class AuenApp(App[None]):
         with Horizontal(id="workspace"):
             with Vertical(classes="pane", id="results-pane"):
                 yield Label("Search results", classes="pane-title")
-                yield Static("Type a query to begin.", id="results-empty")
+                yield DataTable(id="results", cursor_type="row")
             with Vertical(classes="pane", id="queue-pane"):
                 yield Label("Queue", classes="pane-title")
-                yield Static("Your queue is empty.", id="queue-empty")
+                yield DataTable(id="queue", cursor_type="row")
         yield Static("Nothing playing", id="now-playing")
         yield Footer()
 
     def on_mount(self) -> None:
+        results = self.query_one("#results", DataTable)
+        results.add_columns("Title", "Duration")
+        queue = self.query_one("#queue", DataTable)
+        queue.add_columns("Title", "Source", "Availability")
+        self._refresh_queue()
         if self.current_session_mode is SessionMode.ASK:
             self.push_screen(SessionModeScreen(), self._session_mode_selected)
+
+    def on_unmount(self) -> None:
+        self.session.close()
+
+    @on(Input.Submitted, "#search-bar")
+    def search_submitted(self, event: Input.Submitted) -> None:
+        if event.value.strip():
+            self.search_media(event.value)
+
+    @work(exclusive=True, group="youtube-search")
+    async def search_media(self, query: str) -> None:
+        try:
+            tracks = await asyncio.wrap_future(self.session.submit_search(query))
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.notify(str(exc), title="Search failed", severity="error")
+            return
+        self._show_results(tracks)
+
+    def _show_results(self, tracks: list[Track]) -> None:
+        table = self.query_one("#results", DataTable)
+        table.clear()
+        self._result_order = tracks
+        self.search_results = {track.track_id: track for track in tracks}
+        for track in tracks:
+            table.add_row(track.title, track.duration_display or "-", key=track.track_id)
+        if not tracks:
+            self.notify("No matching videos found", title="Search")
+
+    @on(DataTable.RowSelected, "#results")
+    def result_selected(self, event: DataTable.RowSelected) -> None:
+        track = self.search_results.get(str(event.row_key.value))
+        if track is None:
+            return
+        future = self.session.enqueue(track, session_mode=self.current_session_mode)
+        self._refresh_queue()
+        self.notify(track.title, title="Added to queue")
+        if future is not None:
+            future.add_done_callback(self._download_finished)
+
+    def _refresh_queue(self) -> None:
+        table = self.query_one("#queue", DataTable)
+        table.clear()
+        for track in self.session.playlist.queue_list:
+            availability = "offline" if track.is_cached else "stream"
+            table.add_row(
+                track.title,
+                track.source.name.casefold(),
+                availability,
+                key=track.track_id,
+            )
+
+    def _download_finished(self, future: object) -> None:
+        try:
+            exception = future.exception()  # type: ignore[attr-defined]
+        except Exception:
+            return
+        if not self.is_running:
+            return
+        if exception is None:
+            self.call_from_thread(self._refresh_queue)
+            self.call_from_thread(self.notify, "Media is available offline", title="Download")
+        else:
+            self.call_from_thread(
+                self.notify,
+                str(exception),
+                title="Download failed",
+                severity="error",
+            )
 
     def _session_mode_selected(self, mode: SessionMode | None) -> None:
         if mode is not None:
@@ -303,7 +401,30 @@ class AuenApp(App[None]):
         self.query_one("#search-bar", Input).focus()
 
     def action_settings(self) -> None:
-        self.push_screen(SettingsScreen(self.config))
+        self.push_screen(SettingsScreen(self.config), self._settings_closed)
+
+    def _settings_closed(self, saved: bool | None) -> None:
+        if not saved:
+            return
+        self.session.playlist.shuffle = self.config.shuffle
+        self.session.playlist.repeat_mode = RepeatMode(self.config.repeat_mode)
+        self.session.cache.max_cache_bytes = self.config.cache_max_bytes
+        self.session.cache.prune()
+        self.session.save()
+
+    def action_download_selected(self) -> None:
+        table = self.query_one("#results", DataTable)
+        if not 0 <= table.cursor_row < len(self._result_order):
+            return
+        track = self._result_order[table.cursor_row]
+        future = self.session.save_offline(track)
+        future.add_done_callback(self._download_finished)
+        self.notify(track.title, title="Saving offline")
+
+    def action_remove_queued(self) -> None:
+        table = self.query_one("#queue", DataTable)
+        if self.session.remove_queued(table.cursor_row) is not None:
+            self._refresh_queue()
 
 
 def run() -> None:

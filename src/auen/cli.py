@@ -29,7 +29,7 @@ SETTING_ALIASES = {
     "session.restore": "restore_session",
 }
 
-HIDDEN_SETTINGS = {"config_dir"}
+HIDDEN_SETTINGS = {"config_dir", "state_dir"}
 
 
 def build_parser() -> argparse.ArgumentParser:

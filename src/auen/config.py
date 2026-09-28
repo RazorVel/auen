@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from platformdirs import user_cache_dir, user_config_dir
+from platformdirs import user_cache_dir, user_config_dir, user_state_dir
 
 from auen.models import RepeatMode, SessionMode
 
@@ -22,6 +22,7 @@ class AuenConfig:
     backend: str = "auto"
     cache_dir: Path = Path(user_cache_dir("auen"))
     config_dir: Path = Path(user_config_dir("auen"))
+    state_dir: Path = Path(user_state_dir("auen"))
     max_download_threads: int = 4
     volume: int = 80
     shuffle: bool = False
