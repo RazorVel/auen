@@ -1,9 +1,6 @@
 """Main entry point for `python -m auen`."""
 
-
-def main() -> None:
-    print("auen: not yet implemented")
-
+from auen.cli import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

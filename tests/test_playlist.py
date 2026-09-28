@@ -3,7 +3,7 @@
 import threading
 import time
 
-from auen.models import Track, TrackSource
+from auen.models import RepeatMode, Track, TrackSource
 from auen.playlist import Playlist
 
 
@@ -118,7 +118,7 @@ def test_mark_played_adds_to_history() -> None:
 
 def test_recycle_with_loop_on() -> None:
     playlist = Playlist()
-    playlist.loop = True
+    playlist.repeat_mode = RepeatMode.ALL
     track = make_track("t1")
     playlist.mark_played(track)
 
@@ -131,7 +131,7 @@ def test_recycle_with_loop_on() -> None:
 
 def test_recycle_with_loop_off() -> None:
     playlist = Playlist()
-    playlist.loop = False
+    playlist.repeat_mode = RepeatMode.OFF
     track = make_track("t1")
     playlist.mark_played(track)
 
@@ -139,6 +139,30 @@ def test_recycle_with_loop_off() -> None:
 
     assert playlist.history_length == 1
     assert playlist.queue_length == 0
+
+
+def test_complete_repeats_one_track() -> None:
+    playlist = Playlist()
+    playlist.repeat_mode = RepeatMode.ONE
+    track = make_track("t1")
+
+    playlist.complete(track)
+
+    assert playlist.history_list == [track]
+    assert playlist.queue_list == [track]
+
+
+def test_complete_repeats_all_after_queue_finishes() -> None:
+    playlist = Playlist()
+    playlist.repeat_mode = RepeatMode.ALL
+    first = make_track("t1")
+    second = make_track("t2")
+    playlist.mark_played(first)
+
+    playlist.complete(second)
+
+    assert playlist.history_list == []
+    assert playlist.queue_list == [first, second]
 
 
 def test_clear() -> None:

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from auen.models import PlaybackState, PlaybackStatus, Track, TrackSource
+from auen.models import PlaybackState, PlaybackStatus, RepeatMode, SessionMode, Track, TrackSource
 
 
 def test_track_playable_uri_prefers_cache(tmp_path: Path) -> None:
@@ -53,3 +53,8 @@ def test_playback_status() -> None:
     assert status.volume == 50
     assert status.track is None
     assert status.elapsed_seconds == 0.0
+
+
+def test_behavior_enums_have_stable_config_values() -> None:
+    assert RepeatMode.ALL.value == "all"
+    assert SessionMode.STREAM_AND_CACHE.value == "stream_and_cache"

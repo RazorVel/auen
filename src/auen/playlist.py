@@ -5,7 +5,7 @@ import threading
 from collections import deque
 from collections.abc import Iterable
 
-from auen.models import Track
+from auen.models import RepeatMode, Track
 
 
 class Playlist:
@@ -17,7 +17,7 @@ class Playlist:
         self._lock = threading.Lock()
         self._available = threading.Event()
         self.shuffle = False
-        self.loop = False
+        self.repeat_mode = RepeatMode.OFF
 
     def add(self, track: Track) -> None:
         with self._lock:
@@ -102,10 +102,23 @@ class Playlist:
         with self._lock:
             self._history.append(track)
 
+    def complete(self, track: Track) -> None:
+        """Record a finished track and apply the active repeat behavior atomically."""
+        with self._lock:
+            self._history.append(track)
+
+            if self.repeat_mode is RepeatMode.ONE:
+                self._queue.appendleft(track)
+                self._available.set()
+            elif self.repeat_mode is RepeatMode.ALL and not self._queue:
+                self._queue.extend(self._history)
+                self._history.clear()
+                self._available.set()
+
     def recycle(self) -> None:
         """If loop is on, move history back to queue."""
         with self._lock:
-            if self.loop and self._history:
+            if self.repeat_mode is RepeatMode.ALL and self._history:
                 self._queue.extend(self._history)
                 self._history.clear()
                 self._available.set()

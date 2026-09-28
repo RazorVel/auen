@@ -1,8 +1,9 @@
 """Domain models for the auen audio player."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
+from uuid import uuid4
 
 
 class TrackSource(Enum):
@@ -17,6 +18,22 @@ class PlaybackState(Enum):
     PAUSED = auto()
 
 
+class RepeatMode(str, Enum):
+    """How the player behaves after a track or queue finishes."""
+
+    OFF = "off"
+    ALL = "all"
+    ONE = "one"
+
+
+class SessionMode(str, Enum):
+    """Remote-media behavior selected when a session starts."""
+
+    ASK = "ask"
+    STREAM_ONLY = "stream_only"
+    STREAM_AND_CACHE = "stream_and_cache"
+
+
 @dataclass(slots=True)
 class Track:
     title: str
@@ -26,6 +43,7 @@ class Track:
     stream_url: str | None = None
     duration_seconds: float | None = None
     duration_display: str | None = None
+    track_id: str = field(default_factory=lambda: uuid4().hex)
 
     @property
     def is_cached(self) -> bool:

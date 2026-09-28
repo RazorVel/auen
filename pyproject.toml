@@ -20,8 +20,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
     "textual-dev>=1.0",
     "ruff>=0.5.0",
     "mypy>=1.10",
@@ -46,3 +48,5 @@ packages = ["auen"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+timeout = 15
+timeout_method = "thread"

@@ -3,6 +3,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from auen.config import AuenConfig
 
 
@@ -12,9 +14,13 @@ def test_config_defaults() -> None:
     assert config.max_download_threads == 4
     assert config.volume == 80
     assert config.shuffle is False
-    assert config.loop is False
+    assert config.repeat_mode == "off"
     assert config.stream_first is True
     assert config.search_result_count == 5
+    assert config.session_mode == "ask"
+    assert config.cache_max_bytes == 1024**3
+    assert config.restore_session is True
+    assert config.scan_recursive is True
     assert isinstance(config.cache_dir, Path)
     assert isinstance(config.config_dir, Path)
 
@@ -44,7 +50,7 @@ def test_config_load_from_toml(tmp_path: Path) -> None:
     assert config.shuffle is True
     assert config.search_result_count == 10
     # Defaults should remain for unconfigured values
-    assert config.loop is False
+    assert config.repeat_mode == "off"
     assert config.stream_first is True
 
 
@@ -75,3 +81,19 @@ def test_config_xdg_paths() -> None:
     config = AuenConfig()
     assert config.cache_dir.name == "auen"
     assert config.config_dir.name == "auen"
+
+
+def test_config_migrates_legacy_loop_setting(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text("[playback]\nloop = true\n")
+
+    with patch("auen.config.user_config_dir", return_value=str(tmp_path)):
+        config = AuenConfig.load()
+
+    assert config.repeat_mode == "all"
+
+
+def test_config_rejects_invalid_values() -> None:
+    config = AuenConfig(volume=101)
+
+    with pytest.raises(ValueError, match="volume"):
+        config.validate()
