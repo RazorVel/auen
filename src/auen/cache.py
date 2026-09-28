@@ -5,13 +5,31 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from auen.models import Track
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _locked(
+    method: Callable[Concatenate[CacheManager, P], R],
+) -> Callable[Concatenate[CacheManager, P], R]:
+    @wraps(method)
+    def wrapper(self: CacheManager, *args: P.args, **kwargs: P.kwargs) -> R:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return cast("Callable[Concatenate[CacheManager, P], R]", wrapper)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +61,10 @@ class CacheManager:
         self.media_dir = self.root / "media"
         self.max_cache_bytes = max_cache_bytes
         self.media_dir.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.root / "cache.sqlite3", timeout=5.0)
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(
+            self.root / "cache.sqlite3", timeout=5.0, check_same_thread=False
+        )
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode = WAL")
         self._connection.execute("PRAGMA synchronous = FULL")
@@ -78,6 +99,7 @@ class CacheManager:
         digest = hashlib.sha256(track.uri.encode("utf-8")).hexdigest()[:16]
         return self.media_dir / f"{safe_title[:60]}-{digest}{extension.casefold()}"
 
+    @_locked
     def register(self, track: Track, path: Path, *, pinned: bool = False) -> CacheEntry:
         """Index an existing managed file and enforce the automatic-cache limit."""
         managed_path = self._managed_file(path)
@@ -115,6 +137,7 @@ class CacheManager:
             raise ValueError("file exceeds the automatic cache limit; pin it to keep it")
         return entry
 
+    @_locked
     def get(self, source_uri: str, *, touch: bool = True) -> CacheEntry | None:
         row = self._connection.execute(
             "SELECT * FROM media WHERE source_uri = ?", (source_uri,)
@@ -137,6 +160,7 @@ class CacheManager:
             row["last_access_ns"] = accessed
         return _entry_from_row(row)
 
+    @_locked
     def set_pinned(self, source_uri: str, *, pinned: bool) -> CacheEntry | None:
         """Pin an entry, or unpin it and return None if the cache immediately evicts it."""
         with self._connection:
@@ -149,6 +173,7 @@ class CacheManager:
         self.prune()
         return self.get(source_uri, touch=False)
 
+    @_locked
     def remove(self, source_uri: str) -> bool:
         """Explicitly remove one cached or pinned file owned by this manager."""
         entry = self.get(source_uri, touch=False)
@@ -160,6 +185,7 @@ class CacheManager:
             self._connection.execute("DELETE FROM media WHERE source_uri = ?", (source_uri,))
         return True
 
+    @_locked
     def prune(self) -> list[Path]:
         """Evict least-recently-used unpinned files until the cache fits its limit."""
         rows = self._connection.execute(
@@ -180,6 +206,7 @@ class CacheManager:
                 )
         return removed
 
+    @_locked
     def list_entries(self, *, pinned: bool | None = None) -> list[CacheEntry]:
         if pinned is None:
             rows = self._connection.execute(
@@ -192,6 +219,7 @@ class CacheManager:
             ).fetchall()
         return [_entry_from_row(row) for row in rows if Path(row["path"]).is_file()]
 
+    @_locked
     def stats(self) -> CacheStats:
         row = self._connection.execute(
             """
@@ -210,6 +238,7 @@ class CacheManager:
             library_tracks=int(row["library_tracks"] or 0),
         )
 
+    @_locked
     def reconcile(self) -> int:
         """Drop stale database records while leaving unindexed files untouched."""
         rows = self._connection.execute("SELECT source_uri, path FROM media").fetchall()
@@ -220,6 +249,7 @@ class CacheManager:
             )
         return len(missing)
 
+    @_locked
     def close(self) -> None:
         self._connection.close()
 
