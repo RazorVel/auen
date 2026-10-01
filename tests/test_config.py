@@ -21,6 +21,7 @@ def test_config_defaults() -> None:
     assert config.cache_max_bytes == 1024**3
     assert config.restore_session is True
     assert config.scan_recursive is True
+    assert config.theme == "textual-dark"
     assert isinstance(config.cache_dir, Path)
     assert isinstance(config.config_dir, Path)
 

@@ -27,6 +27,7 @@ SETTING_ALIASES = {
     "search.results": "search_result_count",
     "session.mode": "session_mode",
     "session.restore": "restore_session",
+    "ui.theme": "theme",
 }
 
 HIDDEN_SETTINGS = {"config_dir", "state_dir"}

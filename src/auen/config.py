@@ -33,6 +33,7 @@ class AuenConfig:
     cache_max_bytes: int = 1024**3
     restore_session: bool = True
     scan_recursive: bool = True
+    theme: str = "textual-dark"
 
     @classmethod
     def load(cls, overrides: dict[str, Any] | None = None) -> "AuenConfig":
@@ -128,6 +129,7 @@ class AuenConfig:
                 f"backend = {_toml_string(self.backend)}",
                 f"session_mode = {_toml_string(self.session_mode)}",
                 f"restore_session = {_toml_bool(self.restore_session)}",
+                f"theme = {_toml_string(self.theme)}",
                 "",
                 "[playback]",
                 f"volume = {self.volume}",
@@ -170,6 +172,8 @@ class AuenConfig:
             raise ValueError("search_result_count must be at least 1")
         if self.cache_max_bytes < 0:
             raise ValueError("cache_max_bytes cannot be negative")
+        if not self.theme.strip():
+            raise ValueError("theme cannot be empty")
 
 
 def _toml_string(value: str) -> str:

@@ -18,6 +18,7 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    OptionList,
     ProgressBar,
     Select,
     Static,
@@ -136,6 +137,70 @@ class DuplicateQueueScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class ThemeScreen(ModalScreen[str | None]):
+    """Preview installed Textual themes and save only explicit selection."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Restore theme")]
+
+    CSS = """
+    ThemeScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #theme-dialog {
+        width: 54;
+        height: 80%;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #theme-help {
+        height: 2;
+        color: $text-muted;
+    }
+    #theme-list {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, config: AuenConfig, themes: list[str]) -> None:
+        super().__init__()
+        self.config = config
+        self.themes = themes
+        self.original_theme = config.theme
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="theme-dialog"):
+            yield Label("Theme preview", classes="dialog-title")
+            yield Static("↑/↓ preview  ·  Enter save  ·  Esc restore", id="theme-help")
+            yield OptionList(*self.themes, id="theme-list")
+
+    def on_mount(self) -> None:
+        options = self.query_one("#theme-list", OptionList)
+        if self.original_theme in self.themes:
+            options.highlighted = self.themes.index(self.original_theme)
+        options.focus()
+
+    @on(OptionList.OptionHighlighted, "#theme-list")
+    def preview_theme(self, event: OptionList.OptionHighlighted) -> None:
+        self.app.theme = self.themes[event.option_index]
+
+    @on(OptionList.OptionSelected, "#theme-list")
+    def save_theme(self, event: OptionList.OptionSelected) -> None:
+        selected = self.themes[event.option_index]
+        self.config.theme = selected
+        try:
+            self.config.save()
+        except (OSError, ValueError) as exc:
+            self.notify(str(exc), title="Theme not saved", severity="error")
+            return
+        self.dismiss(selected)
+
+    def action_cancel(self) -> None:
+        self.app.theme = self.original_theme
+        self.dismiss(None)
 
 
 class SeekScreen(ModalScreen[float | None]):
@@ -378,6 +443,7 @@ class AuenApp(App[None]):
         ("d", "download_selected", "↓ Offline"),
         ("delete", "remove_queued", "Del Remove"),
         ("f2", "settings", "⚙ Settings"),
+        ("f3", "change_theme", "◐ Theme"),
         ("q", "quit", "q Quit"),
     ]
 
@@ -460,6 +526,10 @@ class AuenApp(App[None]):
     ) -> None:
         super().__init__()
         self.config = config or AuenConfig.load()
+        if self.config.theme in self.available_themes:
+            self.theme = self.config.theme
+        else:
+            self.config.theme = self.theme
         self.session = session or AuenSession(self.config)
         self.backend = backend
         self.backend_error = backend_error
@@ -691,6 +761,16 @@ class AuenApp(App[None]):
 
     def action_settings(self) -> None:
         self.push_screen(SettingsScreen(self.config), self._settings_closed)
+
+    def action_change_theme(self) -> None:
+        self.push_screen(
+            ThemeScreen(self.config, sorted(self.available_themes)),
+            self._theme_selected,
+        )
+
+    def _theme_selected(self, theme: str | None) -> None:
+        if theme is not None:
+            self.notify(theme, title="Theme saved")
 
     def _settings_closed(self, saved: bool | None) -> None:
         if not saved:

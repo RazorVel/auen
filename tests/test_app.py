@@ -11,6 +11,7 @@ from auen.app import (
     SearchInput,
     SessionModeScreen,
     SettingsScreen,
+    ThemeScreen,
     _format_timestamp,
     _parse_timestamp,
 )
@@ -169,6 +170,34 @@ def test_parse_timestamp_rejects_invalid_values(value: str) -> None:
 def test_format_timestamp() -> None:
     assert _format_timestamp(90) == "1:30"
     assert _format_timestamp(3735) == "1:02:15"
+
+
+async def test_theme_preview_escape_restores_original(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test() as pilot:
+        original = app.theme
+        await pilot.press("f3")
+        assert isinstance(app.screen, ThemeScreen)
+        await pilot.press("down")
+        assert app.theme != original
+
+        await pilot.press("escape")
+        assert app.theme == original
+        assert app.config.theme == original
+
+
+async def test_theme_preview_enter_saves_selection(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test() as pilot:
+        await pilot.press("f3")
+        await pilot.press("down", "enter")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, ThemeScreen)
+        assert app.config.theme == app.theme
+        assert (tmp_path / "config.toml").exists()
 
 
 async def test_ctrl_a_selects_all_search_text(tmp_path: Path) -> None:
