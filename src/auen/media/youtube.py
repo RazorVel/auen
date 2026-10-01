@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
 from yt_dlp.utils import DownloadError  # type: ignore[import-untyped]
 
-from auen.models import Track, TrackSource
+from auen.models import CollectionKind, MediaCollection, SearchItem, Track, TrackSource
 
 _YOUTUBE_HOSTS = {"youtube.com", "youtu.be"}
 
@@ -20,39 +20,45 @@ class YouTubeServiceError(RuntimeError):
 class YouTubeService:
     """Search YouTube and resolve selected results without downloading media."""
 
-    def search(self, query: str, *, limit: int = 5) -> list[Track]:
+    def search(self, query: str, *, limit: int = 5) -> list[SearchItem]:
         query = query.strip()
         if not query:
             return []
         if limit < 1:
             raise ValueError("search limit must be at least 1")
 
-        payload = self._extract(f"ytsearch{limit}:{query}", flat=True)
+        fetch_limit = min(100, max(15, limit * 3))
+        target = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+        payload = self._extract(target, flat=True, limit=fetch_limit)
         entries = payload.get("entries") or []
-        tracks: list[Track] = []
+        items: list[SearchItem] = []
+        seen: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            video_id = entry.get("id")
-            webpage_url = entry.get("webpage_url") or entry.get("url")
-            if webpage_url and not str(webpage_url).startswith(("http://", "https://")):
-                webpage_url = None
-            uri = webpage_url or (
-                f"https://www.youtube.com/watch?v={video_id}" if video_id else None
-            )
-            title = entry.get("title")
-            if not uri or not title:
+            collection = _collection(entry)
+            if collection is not None:
+                if collection.uri not in seen:
+                    seen.add(collection.uri)
+                    items.append(collection)
                 continue
-            duration = _duration(entry.get("duration"))
-            tracks.append(
-                Track(
-                    title=str(title),
-                    source=TrackSource.YOUTUBE,
-                    uri=str(uri),
-                    duration_seconds=duration,
-                    duration_display=_format_duration(duration),
-                )
-            )
+            track = _track(entry)
+            if track is not None and track.uri not in seen:
+                seen.add(track.uri)
+                items.append(track)
+        return _limit_mixed_results(items, limit)
+
+    def collection_tracks(self, collection: MediaCollection, *, limit: int = 100) -> list[Track]:
+        """Return a bounded, flat list of selectable tracks from a collection."""
+        payload = self._extract(collection.uri, flat=True, limit=limit)
+        tracks: list[Track] = []
+        for entry in payload.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            track = _track(entry)
+            if track is not None:
+                tracks.append(track)
+        collection.item_count = len(tracks)
         return tracks
 
     def from_url(self, url: str) -> Track:
@@ -79,7 +85,7 @@ class YouTubeService:
         track.duration_display = _format_duration(duration)
         return track
 
-    def _extract(self, target: str, *, flat: bool) -> dict[str, Any]:
+    def _extract(self, target: str, *, flat: bool, limit: int | None = None) -> dict[str, Any]:
         options: dict[str, Any] = {
             "extract_flat": flat,
             "format": "bestaudio/best",
@@ -88,6 +94,8 @@ class YouTubeService:
             "no_warnings": True,
             "skip_download": True,
         }
+        if limit is not None:
+            options["playlistend"] = limit
         try:
             with YoutubeDL(options) as ydl:
                 result = ydl.extract_info(target, download=False)
@@ -107,6 +115,58 @@ def is_youtube_url(value: str) -> bool:
         return False
     host = (parsed.hostname or "").casefold().removeprefix("www.")
     return host in _YOUTUBE_HOSTS or host.endswith(".youtube.com")
+
+
+def _collection(entry: dict[str, Any]) -> MediaCollection | None:
+    uri = str(entry.get("webpage_url") or entry.get("url") or "")
+    identifier = str(entry.get("id") or "")
+    if "/playlist?" not in uri:
+        return None
+    title = entry.get("title")
+    if not title:
+        return None
+    kind = (
+        CollectionKind.ALBUM
+        if identifier.startswith("OLAK5uy") or entry.get("album")
+        else CollectionKind.PLAYLIST
+    )
+    count = entry.get("playlist_count")
+    return MediaCollection(
+        title=str(title),
+        uri=uri,
+        kind=kind,
+        item_count=int(count) if isinstance(count, int) else None,
+        collection_id=identifier or uri,
+    )
+
+
+def _track(entry: dict[str, Any]) -> Track | None:
+    video_id = entry.get("id")
+    uri = entry.get("webpage_url") or entry.get("url")
+    if uri and not str(uri).startswith(("http://", "https://")):
+        uri = None
+    uri = uri or (f"https://www.youtube.com/watch?v={video_id}" if video_id else None)
+    title = entry.get("title")
+    if not uri or not title or not is_youtube_url(str(uri)):
+        return None
+    duration = _duration(entry.get("duration"))
+    return Track(
+        title=str(title),
+        source=TrackSource.YOUTUBE,
+        uri=str(uri),
+        duration_seconds=duration,
+        duration_display=_format_duration(duration),
+    )
+
+
+def _limit_mixed_results(items: list[SearchItem], limit: int) -> list[SearchItem]:
+    selected = items[:limit]
+    if any(isinstance(item, MediaCollection) for item in selected):
+        return selected
+    collection = next((item for item in items[limit:] if isinstance(item, MediaCollection)), None)
+    if collection is not None and selected:
+        selected[-1] = collection
+    return selected
 
 
 def _duration(value: Any) -> float | None:

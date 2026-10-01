@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from auen.cache import CacheEntry, CacheManager
 from auen.downloads import DownloadManager
 from auen.media.youtube import YouTubeService, is_youtube_url
-from auen.models import RepeatMode, SessionMode, Track, TrackSource
+from auen.models import MediaCollection, RepeatMode, SearchItem, SessionMode, Track, TrackSource
 from auen.player import PlaybackController
 from auen.playlist import Playlist
 from auen.state import SessionSnapshot, StateStore
@@ -62,17 +62,26 @@ class AuenSession:
         if config.restore_session:
             self._restore()
 
-    def search(self, query_or_url: str) -> list[Track]:
+    def search(self, query_or_url: str, *, limit: int | None = None) -> list[SearchItem]:
         value = query_or_url.strip()
         if not value:
             return []
         if is_youtube_url(value):
             return [self.youtube.from_url(value)]
-        return self.youtube.search(value, limit=self.config.search_result_count)
+        return self.youtube.search(
+            value,
+            limit=self.config.search_result_count if limit is None else limit,
+        )
 
-    def submit_search(self, query_or_url: str) -> Future[list[Track]]:
+    def submit_search(
+        self, query_or_url: str, *, limit: int | None = None
+    ) -> Future[list[SearchItem]]:
         """Run one search outside the UI thread on an executor owned by this session."""
-        return self._search_executor.submit(self.search, query_or_url)
+        return self._search_executor.submit(self.search, query_or_url, limit=limit)
+
+    def submit_collection(self, collection: MediaCollection) -> Future[list[Track]]:
+        """Load a collection only after the user explicitly opens it."""
+        return self._search_executor.submit(self.youtube.collection_tracks, collection)
 
     def enqueue(
         self,
@@ -132,6 +141,24 @@ class AuenSession:
         if removed is not None:
             self.save()
         return removed
+
+    def prioritize_queued(self, index: int) -> Track | None:
+        prioritized = self.playlist.jump(index)
+        if prioritized is not None:
+            self.save()
+        return prioritized
+
+    def move_queued(self, index: int, delta: int) -> int | None:
+        new_index = self.playlist.move(index, delta)
+        if new_index is not None:
+            self.save()
+        return new_index
+
+    def play_queued_now(self, index: int) -> Track | None:
+        track = self.prioritize_queued(index)
+        if track is not None and self.player is not None and self.current_track is not None:
+            self.player.skip()
+        return track
 
     def save(self) -> None:
         self.state.save(

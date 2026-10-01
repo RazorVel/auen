@@ -2,7 +2,16 @@
 
 from pathlib import Path
 
-from auen.models import PlaybackState, PlaybackStatus, RepeatMode, SessionMode, Track, TrackSource
+from auen.models import (
+    CollectionKind,
+    MediaCollection,
+    PlaybackState,
+    PlaybackStatus,
+    RepeatMode,
+    SessionMode,
+    Track,
+    TrackSource,
+)
 
 
 def test_track_playable_uri_prefers_cache(tmp_path: Path) -> None:
@@ -58,3 +67,14 @@ def test_playback_status() -> None:
 def test_behavior_enums_have_stable_config_values() -> None:
     assert RepeatMode.ALL.value == "all"
     assert SessionMode.STREAM_AND_CACHE.value == "stream_and_cache"
+
+
+def test_media_collection_has_stable_kind_and_identity() -> None:
+    collection = MediaCollection(
+        title="Album",
+        uri="https://youtube.com/playlist?list=album",
+        kind=CollectionKind.ALBUM,
+    )
+
+    assert collection.kind.value == "album"
+    assert collection.collection_id

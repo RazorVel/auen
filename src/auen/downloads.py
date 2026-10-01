@@ -118,6 +118,10 @@ class DownloadManager:
         with self._lock:
             return len(self._inflight)
 
+    def is_active(self, uri: str) -> bool:
+        with self._lock:
+            return uri in self._inflight
+
     def close(self, *, wait: bool = True, cancel_pending: bool = False) -> None:
         with self._lock:
             if self._closed:

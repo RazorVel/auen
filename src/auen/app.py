@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from rich.cells import cell_len, chop_cells
@@ -29,10 +30,23 @@ from textual.widgets import (
 
 from auen.backends import detect_backend
 from auen.config import AuenConfig
-from auen.models import PlaybackState, RepeatMode, SessionMode, Track
+from auen.models import (
+    CollectionKind,
+    MediaCollection,
+    PlaybackState,
+    RepeatMode,
+    SearchItem,
+    SessionMode,
+    Track,
+)
 from auen.session import AuenSession
 
+_LOAD_MORE_KEY = "__load_more__"
+_STATE_KEY = "__state__"
+
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from textual.binding import BindingType
 
     from auen.backends.base import AudioBackend
@@ -51,6 +65,12 @@ class SearchInput(Input):
 class TrackTable(DataTable[object]):
     """Track table whose horizontal arrows page titles rather than scroll columns."""
 
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("shift+up", "priority_up", "Move up", show=False),
+        Binding("shift+down", "priority_down", "Move down", show=False),
+        Binding("escape", "back", "Back", show=False),
+    ]
+
     class TitlePageRequested(Message):
         def __init__(self, table: TrackTable, delta: int) -> None:
             self.table = table
@@ -62,6 +82,20 @@ class TrackTable(DataTable[object]):
             self.table = table
             super().__init__()
 
+    class QueueMoveRequested(Message):
+        def __init__(self, table: TrackTable, delta: int) -> None:
+            self.table = table
+            self.delta = delta
+            super().__init__()
+
+    class QueuePlayNextRequested(Message):
+        def __init__(self, table: TrackTable) -> None:
+            self.table = table
+            super().__init__()
+
+    class ResultsBackRequested(Message):
+        pass
+
     def action_cursor_left(self) -> None:
         self.post_message(self.TitlePageRequested(self, -1))
 
@@ -70,6 +104,37 @@ class TrackTable(DataTable[object]):
 
     def on_resize(self, _event: events.Resize) -> None:
         self.post_message(self.ViewportResized(self))
+
+    def action_priority_up(self) -> None:
+        if self.id == "queue":
+            self.post_message(self.QueueMoveRequested(self, -1))
+        else:
+            self.action_cursor_up()
+
+    def action_priority_down(self) -> None:
+        if self.id == "queue":
+            self.post_message(self.QueueMoveRequested(self, 1))
+        else:
+            self.action_cursor_down()
+
+    def action_scroll_home(self) -> None:
+        if self.id == "queue":
+            self.post_message(self.QueuePlayNextRequested(self))
+        else:
+            super().action_scroll_home()
+
+    def action_back(self) -> None:
+        self.post_message(self.ResultsBackRequested())
+
+
+@dataclass(slots=True)
+class ResultsViewState:
+    items: list[SearchItem]
+    heading: str
+    cursor_row: int
+    query: str | None
+    limit: int
+    has_more: bool
 
 
 class SessionModeScreen(ModalScreen[SessionMode]):
@@ -159,6 +224,60 @@ class DuplicateQueueScreen(ModalScreen[bool]):
         self.dismiss(False)
 
     @on(Button.Pressed, "#confirm-duplicate")
+    def confirm_pressed(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class LoadMoreScreen(ModalScreen[bool]):
+    """Confirm the only interaction that fetches another search page."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    LoadMoreScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #load-more-dialog {
+        width: 56;
+        height: auto;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #load-more-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #load-more-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="load-more-dialog"):
+            yield Label("Load more results?", classes="dialog-title")
+            yield Static(f"Fetch up to {self.count} additional YouTube results?")
+            with Horizontal(id="load-more-actions"):
+                yield Button("Cancel", id="cancel-load-more")
+                yield Button("Load more", id="confirm-load-more", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel-load-more", Button).focus()
+
+    @on(Button.Pressed, "#cancel-load-more")
+    def cancel_pressed(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-load-more")
     def confirm_pressed(self) -> None:
         self.dismiss(True)
 
@@ -563,8 +682,16 @@ class AuenApp(App[None]):
         self.session.on_track_changed = self._playback_track_changed
         self.session.on_playback_error = self._playback_failed
         self.current_session_mode = SessionMode(self.config.session_mode)
-        self.search_results: dict[str, Track] = {}
-        self._result_order: list[Track] = []
+        self.search_results: dict[str, SearchItem] = {}
+        self._result_order: list[SearchItem] = []
+        self._results_heading = "Results"
+        self._results_parent: ResultsViewState | None = None
+        self._search_restore: ResultsViewState | None = None
+        self._active_query: str | None = None
+        self._search_limit = 0
+        self._search_has_more = False
+        self._search_generation = 0
+        self._search_loading = False
         self._title_pages: dict[tuple[str, str], int] = {}
         self._last_saved_position = 0.0
 
@@ -610,9 +737,10 @@ class AuenApp(App[None]):
         results.zebra_stripes = True
         queue = self.query_one("#queue", DataTable)
         queue.cell_padding = 0
+        queue.add_column("#", width=3, key="position")
         queue.add_column("Title", width=10, key="title")
-        queue.add_column("Source", width=7, key="source")
-        queue.add_column("Status", width=9, key="status")
+        queue.add_column("Time", width=7, key="time")
+        queue.add_column("●", width=1, key="status")
         queue.zebra_stripes = True
         self.call_after_refresh(self._sync_table_widths)
         self._refresh_queue()
@@ -629,10 +757,17 @@ class AuenApp(App[None]):
 
     @on(Input.Submitted, "#search-bar")
     def search_submitted(self, event: Input.Submitted) -> None:
-        if event.value.strip():
-            self.query_one("#results-title", Label).update("⌕ Searching…")
-            self.query_one("#results", DataTable).clear()
-            self.search_media(event.value)
+        query = event.value.strip()
+        if not query:
+            return
+        self._search_restore = self._capture_results_state()
+        self._results_parent = None
+        self._active_query = query
+        self._search_limit = self._initial_search_limit()
+        self._search_generation += 1
+        self._search_loading = True
+        self._show_search_state("Searching…")
+        self.search_media(query, self._search_limit, self._search_generation)
 
     @on(TrackTable.TitlePageRequested)
     def title_page_requested(self, event: TrackTable.TitlePageRequested) -> None:
@@ -642,47 +777,141 @@ class AuenApp(App[None]):
     def table_viewport_resized(self, event: TrackTable.ViewportResized) -> None:
         self._sync_table_width(event.table)
 
+    @on(TrackTable.QueueMoveRequested)
+    def queue_move_requested(self, event: TrackTable.QueueMoveRequested) -> None:
+        new_row = self.session.move_queued(event.table.cursor_row, event.delta)
+        if new_row is None:
+            return
+        self._refresh_queue()
+        event.table.move_cursor(row=new_row)
+
+    @on(TrackTable.QueuePlayNextRequested)
+    def queue_play_next_requested(self, event: TrackTable.QueuePlayNextRequested) -> None:
+        track = self.session.prioritize_queued(event.table.cursor_row)
+        if track is None:
+            return
+        self._refresh_queue()
+        event.table.move_cursor(row=0)
+        self.notify(track.title, title="Playing next")
+
+    @on(TrackTable.ResultsBackRequested)
+    def results_back_requested(self) -> None:
+        if self._results_parent is None:
+            return
+        self._search_generation += 1
+        self._search_loading = False
+        parent = self._results_parent
+        self._results_parent = None
+        self._restore_results_state(parent)
+
     @on(events.DescendantBlur)
     def reset_title_after_table_blur(self, event: events.DescendantBlur) -> None:
         if isinstance(event.widget, TrackTable):
             self._reset_title_pages(event.widget)
 
+    @on(DataTable.RowHighlighted)
+    def reset_title_after_row_change(self, event: DataTable.RowHighlighted) -> None:
+        if isinstance(event.data_table, TrackTable):
+            self._reset_title_pages(event.data_table)
+
     @work(exclusive=True, group="youtube-search")
-    async def search_media(self, query: str) -> None:
+    async def search_media(
+        self,
+        query: str,
+        limit: int,
+        generation: int,
+        *,
+        previous_count: int = 0,
+        cursor_row: int = 0,
+        existing_items: Sequence[SearchItem] = (),
+    ) -> None:
         try:
-            tracks = await asyncio.wrap_future(self.session.submit_search(query))
+            items = await asyncio.wrap_future(self.session.submit_search(query, limit=limit))
         except (OSError, RuntimeError, ValueError) as exc:
-            self.query_one("#results-title", Label).update("⌕ Results · 0")
+            if generation != self._search_generation:
+                return
+            self._search_loading = False
+            if previous_count:
+                self.query_one("#results-title", Label).update(f"⌕ Results · {previous_count}")
+            else:
+                self._show_search_state("Search failed — press / to try again")
             self.notify(str(exc), title="Search failed", severity="error")
             return
-        self._show_results(tracks)
+        if generation != self._search_generation:
+            return
+        self._search_loading = False
+        self._search_restore = None
+        self._search_limit = limit
+        if previous_count:
+            # The user may continue navigating while the network request is
+            # running. Preserve the row selected at render time, rather than
+            # the row that was selected when Load more was confirmed.
+            cursor_row = self.query_one("#results", DataTable).cursor_row
+        displayed_items = _merge_search_items(existing_items, items)
+        grew = len(displayed_items) > previous_count
+        self._search_has_more = grew and len(items) >= limit and limit < 100
+        self._show_results(
+            displayed_items,
+            has_more=self._search_has_more,
+            cursor_row=cursor_row,
+        )
 
-    def _show_results(self, tracks: list[Track]) -> None:
+    def _show_results(
+        self,
+        items: Sequence[SearchItem],
+        *,
+        heading: str = "Results",
+        has_more: bool = False,
+        cursor_row: int = 0,
+    ) -> None:
         table = self.query_one("#results", DataTable)
         table.clear()
         self._title_pages = {
             key: page for key, page in self._title_pages.items() if key[0] != "results"
         }
-        self._result_order = tracks
-        self.search_results = {track.track_id: track for track in tracks}
+        self._result_order = list(items)
+        self._results_heading = heading
+        self.search_results = {
+            _result_row_key(item, position): item for position, item in enumerate(items)
+        }
         title_width = self._table_title_width(table)
-        for track in tracks:
+        for position, item in enumerate(items):
             table.add_row(
-                _isolate_ltr(_title_window(track.title, title_width, 0)[0]),
-                track.duration_display or "-",
-                key=track.track_id,
+                _title_cell(_result_title(item), title_width, 0)[0],
+                _result_detail(item),
+                key=_result_row_key(item, position),
             )
-        self.query_one("#results-title", Label).update(f"⌕ Results · {len(tracks)}")
-        if not tracks:
-            self.notify("No matching videos found", title="Search")
+        if has_more:
+            table.add_row("Load more…", "Enter", key=_LOAD_MORE_KEY)
+        self.query_one("#results-title", Label).update(f"⌕ {heading} · {len(items)}")
+        if not items:
+            table.add_row("No matching videos found", "", key=_STATE_KEY)
+            self.query_one("#queue", DataTable).focus()
         else:
             table.focus()
+            table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
 
     @on(DataTable.RowSelected, "#results")
     def result_selected(self, event: DataTable.RowSelected) -> None:
-        track = self.search_results.get(str(event.row_key.value))
-        if track is None:
+        if str(event.row_key.value) == _LOAD_MORE_KEY:
+            self.push_screen(
+                LoadMoreScreen(self.config.search_result_count),
+                self._load_more_decided,
+            )
             return
+        item = self.search_results.get(str(event.row_key.value))
+        if item is None:
+            return
+        if isinstance(item, MediaCollection):
+            parent = self._capture_results_state()
+            self._results_parent = parent
+            self._search_generation += 1
+            generation = self._search_generation
+            self._search_loading = True
+            self.query_one("#results-title", Label).update(f"⌕ Opening {item.title}…")
+            self.open_collection(item, parent, generation)
+            return
+        track = item
         if any(queued.uri == track.uri for queued in self.session.playlist.queue_list):
             self.push_screen(
                 DuplicateQueueScreen(track),
@@ -690,6 +919,87 @@ class AuenApp(App[None]):
             )
             return
         self._enqueue_track(track)
+
+    @work(exclusive=True, group="youtube-search")
+    async def open_collection(
+        self,
+        collection: MediaCollection,
+        parent: ResultsViewState,
+        generation: int,
+    ) -> None:
+        try:
+            tracks = await asyncio.wrap_future(self.session.submit_collection(collection))
+        except (OSError, RuntimeError, ValueError) as exc:
+            if generation != self._search_generation:
+                return
+            self._search_loading = False
+            self._results_parent = None
+            self._restore_results_state(parent)
+            self.notify(str(exc), title="Could not open collection", severity="error")
+            return
+        if generation != self._search_generation:
+            return
+        self._search_loading = False
+        self._active_query = None
+        self._search_limit = 0
+        self._search_has_more = False
+        symbol = "◉" if collection.kind is CollectionKind.ALBUM else "≡"
+        self._show_results(tracks, heading=f"{symbol} {collection.title}")
+
+    def _load_more_decided(self, confirmed: bool | None) -> None:
+        if not confirmed or self._active_query is None or not self._search_has_more:
+            return
+        previous_count = len(self._result_order)
+        new_limit = min(100, self._search_limit + self.config.search_result_count)
+        if new_limit <= self._search_limit:
+            return
+        cursor_row = self.query_one("#results", DataTable).cursor_row
+        self._search_generation += 1
+        self._search_loading = True
+        self.query_one("#results-title", Label).update(f"⌕ Loading more… · {previous_count}")
+        self.search_media(
+            self._active_query,
+            new_limit,
+            self._search_generation,
+            previous_count=previous_count,
+            cursor_row=cursor_row,
+            existing_items=tuple(self._result_order),
+        )
+
+    def _capture_results_state(self) -> ResultsViewState:
+        table = self.query_one("#results", DataTable)
+        return ResultsViewState(
+            items=list(self._result_order),
+            heading=self._results_heading,
+            cursor_row=max(0, table.cursor_row),
+            query=self._active_query,
+            limit=self._search_limit,
+            has_more=self._search_has_more,
+        )
+
+    def _restore_results_state(self, state: ResultsViewState) -> None:
+        self._active_query = state.query
+        self._search_limit = state.limit
+        self._search_has_more = state.has_more
+        self._show_results(
+            state.items,
+            heading=state.heading,
+            has_more=state.has_more,
+            cursor_row=state.cursor_row,
+        )
+
+    def _initial_search_limit(self) -> int:
+        table = self.query_one("#results", DataTable)
+        return min(50, max(1, table.size.height - 1))
+
+    def _show_search_state(self, message: str) -> None:
+        table = self.query_one("#results", DataTable)
+        table.clear()
+        self._result_order = []
+        self.search_results = {}
+        self._results_heading = "Results"
+        table.add_row(message, "", key=_STATE_KEY)
+        self.query_one("#results-title", Label).update("⌕ Results")
 
     def _duplicate_queue_decided(self, track: Track, confirmed: bool | None) -> None:
         if confirmed:
@@ -702,6 +1012,19 @@ class AuenApp(App[None]):
         if future is not None:
             future.add_done_callback(self._download_finished)
 
+    @on(DataTable.RowSelected, "#queue")
+    def queue_selected(self, event: DataTable.RowSelected) -> None:
+        row = event.cursor_row
+        was_playing = self.session.current_track is not None
+        track = self.session.play_queued_now(row)
+        if track is None:
+            return
+        self._refresh_queue()
+        self.notify(
+            track.title,
+            title="Playing now" if was_playing else "Moved to front",
+        )
+
     def _refresh_queue(self) -> None:
         table = self.query_one("#queue", DataTable)
         table.clear()
@@ -710,10 +1033,16 @@ class AuenApp(App[None]):
         }
         title_width = self._table_title_width(table)
         for position, track in enumerate(self.session.playlist.queue_list):
-            availability = "✓ offline" if track.is_cached else "↗ stream"
+            if track.is_cached:
+                availability = "✓"
+            elif self.session.downloads.is_active(track.uri):
+                availability = "↓"
+            else:
+                availability = "↗"
             table.add_row(
-                _isolate_ltr(_title_window(track.title, title_width, 0)[0]),
-                track.source.name.casefold(),
+                str(position + 1),
+                _title_cell(track.title, title_width, 0)[0],
+                track.duration_display or "-",
                 availability,
                 key=f"{track.track_id}:{position}",
             )
@@ -728,23 +1057,28 @@ class AuenApp(App[None]):
         if table.id == "results":
             if row >= len(self._result_order):
                 return
-            track = self._result_order[row]
-            row_key = track.track_id
+            item = self._result_order[row]
+            title = _result_title(item)
+            row_key = _result_row_key(item, row)
         else:
             queue = self.session.playlist.queue_list
             if row >= len(queue):
                 return
             track = queue[row]
+            title = track.title
             row_key = f"{track.track_id}:{row}"
 
         page_key = (table.id or "", row_key)
         requested = self._title_pages.get(page_key, 0) + delta
-        rendered, page = _title_window(track.title, self._table_title_width(table), requested)
+        rendered, page = _title_cell(title, self._table_title_width(table), requested)
         self._title_pages[page_key] = page
-        table.update_cell(row_key, "title", _isolate_ltr(rendered), update_width=False)
+        table.update_cell(row_key, "title", rendered, update_width=False)
 
     def _table_title_width(self, table: DataTable[object]) -> int:
-        reserved = 8 if table.id == "results" else 17
+        # Leave one cell for Textual's vertical scrollbar in addition to the
+        # fixed metadata columns. Otherwise the scrollbar obscures the final
+        # duration digit when the pane has enough rows to scroll.
+        reserved = 9 if table.id == "results" else 13
         return max(6, table.size.width - reserved)
 
     def _reset_title_pages(self, table: DataTable[object]) -> None:
@@ -755,17 +1089,20 @@ class AuenApp(App[None]):
         table.scroll_x = 0
         title_width = self._table_title_width(table)
         if table_id == "results":
-            rows = ((track.track_id, track) for track in self._result_order)
+            rows = (
+                (_result_row_key(item, position), _result_title(item))
+                for position, item in enumerate(self._result_order)
+            )
         else:
             rows = (
-                (f"{track.track_id}:{position}", track)
+                (f"{track.track_id}:{position}", track.title)
                 for position, track in enumerate(self.session.playlist.queue_list)
             )
-        for row_key, track in rows:
+        for row_key, title in rows:
             table.update_cell(
                 row_key,
                 "title",
-                _isolate_ltr(_title_window(track.title, title_width, 0)[0]),
+                _title_cell(title, title_width, 0)[0],
                 update_width=False,
             )
 
@@ -777,23 +1114,23 @@ class AuenApp(App[None]):
     def _sync_table_width(self, table: DataTable[object]) -> None:
         if not table.ordered_columns:
             return
-        table.ordered_columns[0].width = self._table_title_width(table)
+        title_column = 0 if table.id == "results" else 1
+        table.ordered_columns[title_column].width = self._table_title_width(table)
         table.refresh(layout=True)
 
         if table.id == "results":
-            for row, track in enumerate(self._result_order):
+            for row, item in enumerate(self._result_order):
                 if row >= table.row_count:
                     break
-                page_key = ("results", track.track_id)
-                rendered, page = _title_window(
-                    track.title,
+                row_key = _result_row_key(item, row)
+                page_key = ("results", row_key)
+                rendered, page = _title_cell(
+                    _result_title(item),
                     self._table_title_width(table),
                     self._title_pages.get(page_key, 0),
                 )
                 self._title_pages[page_key] = page
-                table.update_cell(
-                    track.track_id, "title", _isolate_ltr(rendered), update_width=False
-                )
+                table.update_cell(row_key, "title", rendered, update_width=False)
             return
 
         for row, track in enumerate(self.session.playlist.queue_list):
@@ -801,13 +1138,13 @@ class AuenApp(App[None]):
                 break
             row_key = f"{track.track_id}:{row}"
             page_key = ("queue", row_key)
-            rendered, page = _title_window(
+            rendered, page = _title_cell(
                 track.title,
                 self._table_title_width(table),
                 self._title_pages.get(page_key, 0),
             )
             self._title_pages[page_key] = page
-            table.update_cell(row_key, "title", _isolate_ltr(rendered), update_width=False)
+            table.update_cell(row_key, "title", rendered, update_width=False)
 
     def _download_finished(self, future: object) -> None:
         try:
@@ -861,6 +1198,10 @@ class AuenApp(App[None]):
             self._reset_progress()
 
     def _refresh_playback_status(self) -> None:
+        # A timer tick may already be queued while Textual is removing the
+        # screen during shutdown. Avoid querying widgets after that point.
+        if not self.query("#playback-time"):
+            return
         player = self.session.player
         track = self.session.current_track
         if player is None or track is None:
@@ -907,6 +1248,16 @@ class AuenApp(App[None]):
         self.query_one("#search-bar", Input).focus()
 
     def action_leave_search(self) -> None:
+        if self._search_loading:
+            self._search_generation += 1
+            self._search_loading = False
+            if self._search_restore is not None:
+                restore = self._search_restore
+                self._search_restore = None
+                self._restore_results_state(restore)
+                self.notify("The pending result was ignored", title="Search cancelled")
+                return
+            self._show_search_state("Search cancelled")
         results = self.query_one("#results", DataTable)
         target = results if self._result_order else self.query_one("#queue", DataTable)
         target.focus()
@@ -1015,7 +1366,11 @@ class AuenApp(App[None]):
         table = self.query_one("#results", DataTable)
         if not 0 <= table.cursor_row < len(self._result_order):
             return
-        track = self._result_order[table.cursor_row]
+        item = self._result_order[table.cursor_row]
+        if isinstance(item, MediaCollection):
+            self.notify("Open the collection and select a track", title="Save offline")
+            return
+        track = item
         future = self.session.save_offline(track)
         future.add_done_callback(self._download_finished)
         self.notify(track.title, title="Saving offline")
@@ -1081,6 +1436,77 @@ def _title_window(value: str, width: int, page: int) -> tuple[str, int]:
     left = "←" if selected else ""
     right = "→" if selected < len(chunks) - 1 else ""
     return f"{left}{chunks[selected].rstrip()}{right}", selected
+
+
+def _title_cell(value: str, width: int, page: int) -> tuple[str, int]:
+    """Render a title with a terminal-safe, emoji-aware right gutter."""
+    value = _stabilize_terminal_emoji(value)
+    rendered, selected = _title_window(
+        value,
+        max(1, width - _emoji_safety_gutter(value)),
+        page,
+    )
+    return _isolate_ltr(rendered), selected
+
+
+def _stabilize_terminal_emoji(value: str) -> str:
+    """Remove emoji composition controls whose terminal widths are inconsistent."""
+    return "".join(
+        character
+        for character in value
+        if character not in {"\ufe0e", "\ufe0f", "\u200d", "\u20e3"}
+        and not "\U0001f3fb" <= character <= "\U0001f3ff"
+    )
+
+
+def _emoji_safety_gutter(value: str) -> int:
+    """Allow for terminals disagreeing with Unicode's emoji cell widths."""
+    emoji_codepoints = sum(
+        1
+        for character in value
+        if "\U0001f000" <= character <= "\U0001faff"
+        or "\u2600" <= character <= "\u27bf"
+    )
+    return 2 + min(6, emoji_codepoints)
+
+
+def _result_id(item: SearchItem) -> str:
+    return item.track_id if isinstance(item, Track) else item.collection_id
+
+
+def _result_row_key(item: SearchItem, position: int) -> str:
+    """Return a display-unique key even when an extractor repeats an item."""
+    return f"{_result_id(item)}:{position}"
+
+
+def _merge_search_items(
+    existing: Sequence[SearchItem], incoming: Sequence[SearchItem]
+) -> list[SearchItem]:
+    """Preserve displayed order and append only newly discovered media."""
+    merged: list[SearchItem] = []
+    seen: set[str] = set()
+    for item in (*existing, *incoming):
+        identity = item.uri
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(item)
+    return merged
+
+
+def _result_title(item: SearchItem) -> str:
+    if isinstance(item, Track):
+        return f"♪ {item.title}"
+    symbol = "◉" if item.kind is CollectionKind.ALBUM else "≡"
+    return f"{symbol} {item.title}"
+
+
+def _result_detail(item: SearchItem) -> str:
+    if isinstance(item, Track):
+        return item.duration_display or "-"
+    if item.item_count is not None:
+        return f"{item.item_count} trk"
+    return "album" if item.kind is CollectionKind.ALBUM else "list"
 
 
 def _isolate_ltr(value: str) -> str:

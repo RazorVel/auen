@@ -92,9 +92,13 @@ def test_search_delegates_query_and_youtube_url(tmp_path: Path) -> None:
         config, state=state, cache=cache, downloads=downloads, youtube=youtube
     ) as session:
         assert session.search("query")[0].title == "result"
+        assert session.search("more", limit=12)[0].title == "result"
         assert session.search("https://youtu.be/url")[0].title == "url"
 
-    youtube.search.assert_called_once_with("query", limit=5)
+    assert youtube.search.call_args_list == [
+        (("query",), {"limit": 5}),
+        (("more",), {"limit": 12}),
+    ]
     youtube.from_url.assert_called_once_with("https://youtu.be/url")
 
 

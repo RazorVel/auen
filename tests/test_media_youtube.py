@@ -6,7 +6,7 @@ import pytest
 from yt_dlp.utils import DownloadError
 
 from auen.media.youtube import YouTubeService, YouTubeServiceError, is_youtube_url
-from auen.models import Track, TrackSource
+from auen.models import CollectionKind, MediaCollection, Track, TrackSource
 
 
 def test_youtube_url_validation() -> None:
@@ -35,11 +35,108 @@ def test_search_returns_selectable_tracks() -> None:
     with patch.object(service, "_extract", return_value=response) as extract:
         tracks = service.search("test query", limit=3)
 
-    extract.assert_called_once_with("ytsearch3:test query", flat=True)
+    extract.assert_called_once_with(
+        "https://www.youtube.com/results?search_query=test+query",
+        flat=True,
+        limit=15,
+    )
     assert [track.title for track in tracks] == ["First", "Second"]
     assert tracks[0].uri == "https://www.youtube.com/watch?v=abc"
     assert tracks[0].duration_display == "1:05"
     assert tracks[1].duration_display == "1:01:01"
+
+
+def test_search_includes_a_collection_with_a_type_symbol_model() -> None:
+    service = YouTubeService()
+    response = {
+        "entries": [
+            {"id": f"v{index}", "title": f"Track {index}", "duration": 60} for index in range(6)
+        ]
+        + [
+            {
+                "id": "PLmix",
+                "title": "Someone's mix",
+                "url": "https://www.youtube.com/playlist?list=PLmix",
+                "ie_key": "YoutubeTab",
+            }
+        ]
+    }
+
+    with patch.object(service, "_extract", return_value=response):
+        items = service.search("mix", limit=5)
+
+    assert len(items) == 5
+    assert isinstance(items[-1], MediaCollection)
+    assert items[-1].kind is CollectionKind.PLAYLIST
+
+
+def test_search_deduplicates_repeated_video_and_collection_uris() -> None:
+    service = YouTubeService()
+    response = {
+        "entries": [
+            {"id": "same", "title": "First copy", "duration": 60},
+            {"id": "same", "title": "Second copy", "duration": 60},
+            {
+                "id": "PLsame",
+                "title": "Playlist copy one",
+                "url": "https://www.youtube.com/playlist?list=PLsame",
+            },
+            {
+                "id": "PLsame",
+                "title": "Playlist copy two",
+                "url": "https://www.youtube.com/playlist?list=PLsame",
+            },
+        ]
+    }
+
+    with patch.object(service, "_extract", return_value=response):
+        items = service.search("duplicates", limit=5)
+
+    assert len(items) == 2
+    assert [item.uri for item in items] == [
+        "https://www.youtube.com/watch?v=same",
+        "https://www.youtube.com/playlist?list=PLsame",
+    ]
+
+
+def test_official_album_playlist_is_classified_as_album() -> None:
+    service = YouTubeService()
+    response = {
+        "entries": [
+            {
+                "id": "OLAK5uy_album",
+                "title": "Official album",
+                "url": "https://www.youtube.com/playlist?list=OLAK5uy_album",
+            }
+        ]
+    }
+
+    with patch.object(service, "_extract", return_value=response):
+        items = service.search("album", limit=5)
+
+    assert isinstance(items[0], MediaCollection)
+    assert items[0].kind is CollectionKind.ALBUM
+
+
+def test_collection_tracks_are_bounded_and_selectable() -> None:
+    service = YouTubeService()
+    collection = MediaCollection(
+        title="A mix",
+        uri="https://www.youtube.com/playlist?list=PLmix",
+    )
+    response = {
+        "entries": [
+            {"id": "abc", "title": "First", "duration": 65},
+            {"id": "def", "title": "Second", "duration": 90},
+        ]
+    }
+
+    with patch.object(service, "_extract", return_value=response) as extract:
+        tracks = service.collection_tracks(collection)
+
+    extract.assert_called_once_with(collection.uri, flat=True, limit=100)
+    assert [track.title for track in tracks] == ["First", "Second"]
+    assert collection.item_count == 2
 
 
 def test_resolve_populates_direct_stream_metadata() -> None:

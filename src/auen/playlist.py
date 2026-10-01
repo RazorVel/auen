@@ -99,6 +99,19 @@ class Playlist:
             self._queue.appendleft(track)
             return track
 
+    def move(self, index: int, delta: int) -> int | None:
+        """Move a queued track by a relative number of positions."""
+        with self._lock:
+            if index < 0 or index >= len(self._queue):
+                return None
+            target = min(max(0, index + delta), len(self._queue) - 1)
+            if target == index:
+                return target
+            track = self._queue[index]
+            del self._queue[index]
+            self._queue.insert(target, track)
+            return target
+
     def mark_played(self, track: Track) -> None:
         """Move a track to history."""
         with self._lock:

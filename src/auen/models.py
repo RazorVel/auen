@@ -34,6 +34,13 @@ class SessionMode(str, Enum):
     STREAM_AND_CACHE = "stream_and_cache"
 
 
+class CollectionKind(str, Enum):
+    """A browsable group returned by YouTube search."""
+
+    ALBUM = "album"
+    PLAYLIST = "playlist"
+
+
 @dataclass(slots=True)
 class Track:
     title: str
@@ -58,6 +65,18 @@ class Track:
         if self.stream_url is not None:
             return self.stream_url
         return self.uri
+
+
+@dataclass(slots=True)
+class MediaCollection:
+    title: str
+    uri: str
+    kind: CollectionKind = CollectionKind.PLAYLIST
+    item_count: int | None = None
+    collection_id: str = field(default_factory=lambda: uuid4().hex)
+
+
+SearchItem = Track | MediaCollection
 
 
 @dataclass(slots=True)

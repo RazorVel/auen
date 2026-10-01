@@ -107,6 +107,18 @@ def test_jump_moves_to_head() -> None:
     assert playlist.queue_list[0] == tracks[2]
 
 
+def test_move_changes_queue_priority_and_clamps_at_edges() -> None:
+    playlist = Playlist()
+    tracks = [make_track(f"t{i}") for i in range(3)]
+    playlist.add_many(tracks)
+
+    assert playlist.move(2, -1) == 1
+    assert playlist.queue_list == [tracks[0], tracks[2], tracks[1]]
+    assert playlist.move(1, -10) == 0
+    assert playlist.queue_list[0] == tracks[2]
+    assert playlist.move(99, 1) is None
+
+
 def test_mark_played_adds_to_history() -> None:
     playlist = Playlist()
     track = make_track("t1")

@@ -27,6 +27,10 @@ Supporting arbitrary non-YouTube remote URLs is outside the initial scope.
 
 - Provide play, pause, resume, next, previous, seek when supported, and volume control.
 - Maintain a reorderable queue and playback history.
+- Keep Queue compact as `# | Title | Time | S`; status values use `↗` for stream,
+  `↓` for an active download, `✓` for offline-ready, and `!` for a failed item.
+  Enter plays the selected row now, Home promotes it to play next without interruption,
+  and Shift+Up/Down adjusts its priority one position.
 - Support shuffle and three repeat modes: off, all, and one.
 - Clearly disable or hide controls unsupported by the selected backend.
 - Restore queue, history, current track, and playback position after restart or crash.
@@ -114,12 +118,17 @@ Settings. Offline mode should remain useful when the network is unavailable.
 - The first search page adapts to the visible result-pane capacity while respecting a
   safe upper bound. Reaching the end offers an explicit confirmation to load the next
   page; additional results are never fetched merely because the cursor moved.
+- Search may return tracks, albums, and playlists. `♪`, `◉`, and `≡` identify them
+  respectively; only metadata-confirmed albums use the album symbol. Activating a
+  collection explicitly loads a bounded track list, and Escape returns to search results.
 - Search titles are ellipsized to preserve the duration column. Highlighting a result
   exposes its full title and source without requiring a wide terminal.
 - Table clipping and ellipsizing use terminal display-cell width so wide characters,
   combining marks, and right-to-left scripts cannot paint beyond pane boundaries.
 - Directional isolation keeps right-to-left titles from reordering duration or status
   columns. Leaving a table resets any paged title to its leftmost segment.
+- Title cells retain a one-cell gutter so terminal-specific emoji and variation-selector
+  widths cannot push adjacent metadata columns out of alignment.
 - Table widths refresh from each pane's final viewport size after every terminal resize;
   repeated shrinking and expansion must never leave columns one resize behind.
 - `Ctrl+A` selects all text in editable fields. Widget navigation keys must not silently
