@@ -3,6 +3,7 @@
 import threading
 import time
 from collections.abc import Callable
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -61,6 +62,18 @@ class FakeBackend(AudioBackend):
     @property
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(True, True, True, True)
+
+
+class OneWaitFailureBackend(FakeBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed_once = False
+
+    def wait_for_end(self, timeout: float | None = None) -> bool:
+        if not self.failed_once:
+            self.failed_once = True
+            raise RuntimeError("status unavailable")
+        return super().wait_for_end(timeout)
 
 
 def make_track(title: str) -> Track:
@@ -174,6 +187,28 @@ def test_preparation_error_is_reported_without_killing_worker() -> None:
     player.close()
 
 
+def test_status_error_is_reported_without_killing_worker() -> None:
+    playlist = Playlist()
+    backend = OneWaitFailureBackend()
+    errors: list[tuple[Track, Exception]] = []
+    failed = make_track("failed-status")
+    good = make_track("good-after-status")
+    playlist.add_many([failed, good])
+    player = PlaybackController(
+        playlist,
+        backend,
+        on_error=lambda track, error: errors.append((track, error)),
+    )
+    player.start()
+
+    wait_until(lambda: backend.played == [failed.uri, good.uri])
+
+    assert errors[0][0] is failed
+    assert str(errors[0][1]) == "status unavailable"
+    assert playlist.history_list == [failed]
+    player.close()
+
+
 def test_rejects_invalid_volume() -> None:
     player = PlaybackController(Playlist(), FakeBackend())
     with pytest.raises(ValueError, match="between 0 and 100"):
@@ -184,3 +219,15 @@ def test_rejects_negative_absolute_seek() -> None:
     player = PlaybackController(Playlist(), FakeBackend())
     with pytest.raises(ValueError, match="negative"):
         player.seek_to(-1)
+
+
+def test_close_reports_backend_stop_error_after_clearing_current_track() -> None:
+    backend = FakeBackend()
+    player = PlaybackController(Playlist(), backend)
+    player._current_track = make_track("active")
+    backend.stop = MagicMock(side_effect=RuntimeError("stop failed"))  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        player.close()
+
+    assert player.current_track is None

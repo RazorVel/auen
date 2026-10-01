@@ -87,7 +87,9 @@ class DownloadManager:
     def _download_file(self, track: Track, directory: Path) -> Path:
         output = directory / "media.%(ext)s"
         options: dict[str, Any] = {
-            "format": "bestaudio/best",
+            # Android's MediaPlayer reliably accepts M4A/AAC. Prefer it for
+            # cached files while retaining fallbacks for unusual uploads.
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
             "noplaylist": True,
             "outtmpl": str(output),
             "quiet": True,

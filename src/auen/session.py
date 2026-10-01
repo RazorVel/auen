@@ -223,14 +223,26 @@ class AuenSession:
         if self._closed:
             return
         self._closed = True
+        first_error: Exception | None = None
+
+        def cleanup(action: Callable[[], object]) -> None:
+            nonlocal first_error
+            try:
+                action()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+
         if self.player is not None:
-            self.player.close()
-        self.save()
-        self._search_executor.shutdown(wait=True, cancel_futures=True)
-        self._auto_cache_executor.shutdown(wait=True, cancel_futures=True)
-        self.downloads.close(wait=True, cancel_pending=True)
-        self.cache.close()
-        self.state.close()
+            cleanup(self.player.close)
+        cleanup(self.save)
+        cleanup(lambda: self._search_executor.shutdown(wait=True, cancel_futures=True))
+        cleanup(lambda: self._auto_cache_executor.shutdown(wait=True, cancel_futures=True))
+        cleanup(lambda: self.downloads.close(wait=True, cancel_pending=True))
+        cleanup(self.cache.close)
+        cleanup(self.state.close)
+        if first_error is not None:
+            raise first_error
 
     def __enter__(self) -> AuenSession:
         return self

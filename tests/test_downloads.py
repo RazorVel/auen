@@ -3,7 +3,7 @@
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -142,3 +142,23 @@ def test_rejects_non_youtube_tracks(tmp_path: Path) -> None:
         pytest.raises(ValueError, match="only YouTube"),
     ):
         downloads.submit(local)
+
+
+def test_download_prefers_android_compatible_audio(tmp_path: Path) -> None:
+    track = make_track("compatible")
+    extractor = MagicMock()
+    extractor.extract_info.side_effect = lambda *_args, **_kwargs: (
+        tmp_path / "media.m4a"
+    ).write_bytes(b"audio")
+
+    with (
+        CacheManager(tmp_path / "cache") as cache,
+        DownloadManager(cache) as downloads,
+        patch("auen.downloads.YoutubeDL") as youtube_dl,
+    ):
+        youtube_dl.return_value.__enter__.return_value = extractor
+        downloaded = downloads._download_file(track, tmp_path)
+
+    options = youtube_dl.call_args.args[0]
+    assert options["format"].startswith("bestaudio[ext=m4a]/")
+    assert downloaded.suffix == ".m4a"

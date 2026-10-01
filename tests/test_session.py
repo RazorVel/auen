@@ -7,6 +7,8 @@ from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from auen.backends.base import AudioBackend, BackendCapabilities
 from auen.cache import CacheManager
 from auen.config import AuenConfig
@@ -127,6 +129,24 @@ def test_close_is_idempotent(tmp_path: Path) -> None:
 
     session.close()
     session.close()
+
+
+def test_close_releases_resources_after_player_error(tmp_path: Path) -> None:
+    config = AuenConfig(config_dir=tmp_path, cache_dir=tmp_path / "cache")
+    state, cache, downloads = make_dependencies(tmp_path)
+    session = AuenSession(config, state=state, cache=cache, downloads=downloads)
+    session.player = MagicMock()
+    session.player.close.side_effect = RuntimeError("backend stop failed")
+    downloads.close = MagicMock(wraps=downloads.close)  # type: ignore[method-assign]
+    cache.close = MagicMock(wraps=cache.close)  # type: ignore[method-assign]
+    state.close = MagicMock(wraps=state.close)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="backend stop failed"):
+        session.close()
+
+    downloads.close.assert_called_once_with(wait=True, cancel_pending=True)
+    cache.close.assert_called_once_with()
+    state.close.assert_called_once_with()
 
 
 def test_cache_mode_schedules_background_download(tmp_path: Path) -> None:

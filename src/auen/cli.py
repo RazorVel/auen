@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -169,12 +170,36 @@ def _doctor() -> int:
         print(f"[fail] Configuration: {exc}")
         problems += 1
 
-    mpv = shutil.which("mpv")
     termux = shutil.which("termux-media-player")
-    if mpv:
-        print(f"[ok] mpv: {mpv}")
-    elif termux:
+    mpv = shutil.which("mpv")
+    if termux:
         print(f"[ok] Termux media player: {termux}")
+        volume = shutil.which("termux-volume")
+        if volume:
+            print(f"[ok] Termux volume: {volume}")
+        else:
+            print("[fail] termux-volume was not found (install the termux-api package)")
+            problems += 1
+        try:
+            probe = subprocess.run(
+                ["termux-media-player", "info"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[fail] Termux:API companion did not respond: {exc}")
+            problems += 1
+        else:
+            if probe.returncode == 0:
+                print("[ok] Termux:API companion responded")
+            else:
+                detail = (probe.stderr or probe.stdout).strip()
+                print(f"[fail] Termux:API companion: {detail or 'command failed'}")
+                problems += 1
+    elif mpv:
+        print(f"[ok] mpv: {mpv}")
     else:
         print("[fail] No playback backend found (mpv or termux-media-player)")
         problems += 1

@@ -13,8 +13,14 @@ def detect_backend(preference: str = "auto") -> AudioBackend:
         raise ValueError(f"Unsupported audio backend: {preference}")
 
     if preference == "mpv":
+        if not shutil.which("mpv"):
+            raise RuntimeError("mpv was not found; install mpv or choose another backend")
         return MpvBackend()
     if preference == "termux":
+        if not shutil.which("termux-media-player"):
+            raise RuntimeError(
+                "termux-media-player was not found; install the Termux:API package"
+            )
         return TermuxBackend()
 
     if shutil.which("termux-media-player"):

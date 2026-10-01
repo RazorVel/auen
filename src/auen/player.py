@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -73,13 +74,25 @@ class PlaybackController:
                 continue
 
             ended = False
+            playback_error: Exception | None = None
             while not self._stop_event.is_set():
-                if self.backend.wait_for_end(timeout=0.25):
-                    ended = True
+                try:
+                    if self.backend.wait_for_end(timeout=0.25):
+                        ended = True
+                        break
+                except Exception as exc:
+                    playback_error = exc
                     break
 
             if self._stop_event.is_set():
                 break
+            if playback_error is not None:
+                with contextlib.suppress(Exception):
+                    self.backend.stop()
+                self.playlist.mark_played(track)
+                self._report_error(track, playback_error)
+                self._set_current(None)
+                continue
             if ended or self._skip_requested.is_set():
                 self.playlist.complete(track)
             self._set_current(None)
@@ -137,13 +150,19 @@ class PlaybackController:
 
     def close(self, *, timeout: float = 3.0) -> None:
         self._stop_event.set()
-        self.backend.stop()
+        stop_error: Exception | None = None
+        try:
+            self.backend.stop()
+        except Exception as exc:
+            stop_error = exc
         thread = self._thread
         if thread is not None:
             thread.join(timeout=timeout)
             if thread.is_alive():
                 raise RuntimeError("playback worker did not stop in time")
         self._set_current(None)
+        if stop_error is not None:
+            raise stop_error
 
     def _set_current(self, track: Track | None) -> None:
         with self._lock:
