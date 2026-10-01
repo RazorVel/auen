@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from rich.cells import cell_len
+from textual.containers import Horizontal
 from textual.widgets import DataTable, Input, Label
 
 from auen.app import (
@@ -98,7 +99,7 @@ async def test_search_result_can_be_selected_into_durable_queue(tmp_path: Path) 
         await pilot.press("enter")
         await app.workers.wait_for_complete()
         results = app.query_one("#results", DataTable)
-        assert results.row_count == 1
+        assert f"{result.track_id}:0" in app.search_results
         assert results.has_focus
         assert "Results · 1" in str(app.query_one("#results-title", Label).render())
 
@@ -351,7 +352,10 @@ async def test_escape_leaves_search_for_main_tables(tmp_path: Path) -> None:
 async def test_left_and_right_page_selected_title_without_hiding_time(tmp_path: Path) -> None:
     app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
     result = Track(
-        title="Salim की Request पर Shreya ने गाया a deliberately long title",
+        title=(
+            "Salim की Request पर Shreya ने गाया a deliberately long title "
+            "that remains pageable even in a full-width phone pane"
+        ),
         source=TrackSource.YOUTUBE,
         uri="https://youtube.com/watch?v=unicode",
         duration_display="4:27",
@@ -483,6 +487,38 @@ async def test_table_columns_refresh_at_each_resized_width(tmp_path: Path) -> No
             assert sum(
                 column.get_render_width(queue) for column in queue.ordered_columns
             ) <= queue.size.width - 1
+
+
+async def test_workspace_stacks_on_narrow_terminals_and_restores_wide_layout(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        workspace = app.query_one("#workspace", Horizontal)
+        results_pane = app.query_one("#results-pane")
+        queue_pane = app.query_one("#queue-pane")
+
+        assert not workspace.has_class("narrow")
+        assert results_pane.region.y == queue_pane.region.y
+        assert results_pane.region.x < queue_pane.region.x
+
+        await pilot.resize_terminal(60, 30)
+        await pilot.pause()
+
+        assert workspace.has_class("narrow")
+        assert results_pane.region.x == queue_pane.region.x
+        assert results_pane.region.y < queue_pane.region.y
+        assert results_pane.region.width == queue_pane.region.width
+        assert app.query_one("#results", DataTable).size.height >= 5
+        assert app.query_one("#queue", DataTable).size.height >= 5
+
+        await pilot.resize_terminal(120, 30)
+        await pilot.pause()
+
+        assert not workspace.has_class("narrow")
+        assert results_pane.region.y == queue_pane.region.y
+        assert results_pane.region.x < queue_pane.region.x
 
 
 async def test_collection_opens_tracks_and_escape_returns_to_search(tmp_path: Path) -> None:

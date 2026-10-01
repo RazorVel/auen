@@ -582,6 +582,7 @@ class AuenApp(App[None]):
 
     TITLE = "auen"
     SUB_TITLE = "terminal audio"
+    NARROW_BREAKPOINT = 88
     BINDINGS: ClassVar[list[BindingType]] = [
         ("/", "focus_search", "⌕ Search"),
         ("space", "toggle_playback", "▶/Ⅱ Play"),
@@ -613,6 +614,22 @@ class AuenApp(App[None]):
     }
     #queue-pane {
         margin-left: 1;
+    }
+    #workspace.narrow {
+        layout: vertical;
+        margin: 0 1;
+    }
+    #workspace.narrow .pane {
+        width: 1fr;
+        height: 1fr;
+        padding: 0 1;
+    }
+    #workspace.narrow .pane-title {
+        margin-bottom: 0;
+    }
+    #workspace.narrow #queue-pane {
+        margin-left: 0;
+        margin-top: 0;
     }
     .pane-title {
         text-style: bold;
@@ -733,6 +750,7 @@ class AuenApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._apply_responsive_layout(self.size.width)
         results = self.query_one("#results", DataTable)
         results.cell_padding = 0
         results.add_column("Title", width=10, key="title")
@@ -754,6 +772,14 @@ class AuenApp(App[None]):
             self._start_player()
         if self.backend_error is not None:
             self.notify(self.backend_error, title="Playback unavailable", severity="warning")
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_responsive_layout(event.size.width)
+        self.call_after_refresh(self._sync_table_widths)
+
+    def _apply_responsive_layout(self, width: int) -> None:
+        workspace = self.query_one("#workspace", Horizontal)
+        workspace.set_class(width < self.NARROW_BREAKPOINT, "narrow")
 
     def on_unmount(self) -> None:
         self.session.close()
