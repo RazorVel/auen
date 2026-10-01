@@ -56,6 +56,7 @@ class AuenSession:
         self.on_track_changed: Callable[[Track | None], None] | None = None
         self.on_playback_error: Callable[[Track, Exception], None] | None = None
         self._temporary_uris: set[str] = set()
+        self._closed = False
 
         self.playlist.shuffle = config.shuffle
         self.playlist.repeat_mode = RepeatMode(config.repeat_mode)
@@ -219,6 +220,9 @@ class AuenSession:
             self.on_playback_error(track, error)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if self.player is not None:
             self.player.close()
         self.save()

@@ -27,6 +27,7 @@ from textual.widgets import (
     Static,
     Switch,
 )
+from textual.widgets.data_table import CellDoesNotExist
 
 from auen.backends import detect_backend
 from auen.config import AuenConfig
@@ -1080,7 +1081,7 @@ class AuenApp(App[None]):
         requested = self._title_pages.get(page_key, 0) + delta
         rendered, page = _title_cell(title, self._table_title_width(table), requested)
         self._title_pages[page_key] = page
-        table.update_cell(row_key, "title", rendered, update_width=False)
+        self._update_title_cell(table, row_key, rendered)
 
     def _table_title_width(self, table: DataTable[object]) -> int:
         # Leave one cell for Textual's vertical scrollbar in addition to the
@@ -1107,11 +1108,10 @@ class AuenApp(App[None]):
                 for position, track in enumerate(self.session.playlist.queue_list)
             )
         for row_key, title in rows:
-            table.update_cell(
+            self._update_title_cell(
+                table,
                 row_key,
-                "title",
                 _title_cell(title, title_width, 0)[0],
-                update_width=False,
             )
 
     def _sync_table_widths(self) -> None:
@@ -1138,7 +1138,7 @@ class AuenApp(App[None]):
                     self._title_pages.get(page_key, 0),
                 )
                 self._title_pages[page_key] = page
-                table.update_cell(row_key, "title", rendered, update_width=False)
+                self._update_title_cell(table, row_key, rendered)
             return
 
         for row, track in enumerate(self.session.playlist.queue_list):
@@ -1152,7 +1152,16 @@ class AuenApp(App[None]):
                 self._title_pages.get(page_key, 0),
             )
             self._title_pages[page_key] = page
-            table.update_cell(row_key, "title", rendered, update_width=False)
+            self._update_title_cell(table, row_key, rendered)
+
+    @staticmethod
+    def _update_title_cell(table: DataTable[object], row_key: str, value: str) -> bool:
+        """Ignore title updates for a table snapshot already being replaced."""
+        try:
+            table.update_cell(row_key, "title", value, update_width=False)
+        except CellDoesNotExist:
+            return False
+        return True
 
     def _download_finished(self, future: object) -> None:
         try:
@@ -1398,7 +1407,13 @@ def run() -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         backend = None
         backend_error = str(exc)
-    AuenApp(config, backend=backend, backend_error=backend_error).run()
+    app = AuenApp(config, backend=backend, backend_error=backend_error)
+    try:
+        app.run()
+    finally:
+        # Textual may not dispatch Unmount after an unhandled UI exception.
+        # Always stop playback and owned workers before returning to the shell.
+        app.session.close()
 
 
 def _parse_timestamp(value: str) -> float:

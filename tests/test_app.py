@@ -2,6 +2,7 @@
 
 import threading
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from rich.cells import cell_len
@@ -22,6 +23,7 @@ from auen.app import (
     _stabilize_terminal_emoji,
     _title_cell,
     _title_window,
+    run,
 )
 from auen.cache import CacheManager
 from auen.config import AuenConfig
@@ -401,6 +403,37 @@ async def test_paged_title_resets_when_highlight_moves_to_another_row(tmp_path: 
 
         await pilot.press("down")
         assert table.get_cell(first_key, "title") == first_cell
+
+
+async def test_title_reset_ignores_queue_rows_replaced_by_shuffle(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    before = Track(title="Before", source=TrackSource.LOCAL, uri="/before.opus")
+    after = Track(title="After", source=TrackSource.LOCAL, uri="/after.opus")
+
+    async with app.run_test():
+        app.session.playlist.add(before)
+        app._refresh_queue()
+        queue = app.query_one("#queue", DataTable)
+
+        app.session.playlist.restore([after], [])
+        app._reset_title_pages(queue)
+
+        assert queue.row_count == 1
+
+
+def test_run_closes_session_after_unhandled_ui_error(tmp_path: Path) -> None:
+    app = MagicMock()
+    app.run.side_effect = RuntimeError("UI crash")
+
+    with (
+        patch("auen.app.AuenConfig.load", return_value=AuenConfig(config_dir=tmp_path)),
+        patch("auen.app.detect_backend", return_value=MagicMock()),
+        patch("auen.app.AuenApp", return_value=app),
+        pytest.raises(RuntimeError, match="UI crash"),
+    ):
+        run()
+
+    app.session.close.assert_called_once_with()
 
 
 async def test_arabic_title_is_directionally_isolated_from_time(tmp_path: Path) -> None:
