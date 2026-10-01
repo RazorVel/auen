@@ -6,10 +6,12 @@ import asyncio
 import math
 from typing import TYPE_CHECKING, ClassVar
 
-from textual import on, work
+from rich.cells import cell_len, chop_cells
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
@@ -41,8 +43,33 @@ class SearchInput(Input):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+a", "select_all", "Select all", show=False, priority=True),
+        Binding("escape", "app.leave_search", "Leave search", show=False),
         *Input.BINDINGS,
     ]
+
+
+class TrackTable(DataTable[object]):
+    """Track table whose horizontal arrows page titles rather than scroll columns."""
+
+    class TitlePageRequested(Message):
+        def __init__(self, table: TrackTable, delta: int) -> None:
+            self.table = table
+            self.delta = delta
+            super().__init__()
+
+    class ViewportResized(Message):
+        def __init__(self, table: TrackTable) -> None:
+            self.table = table
+            super().__init__()
+
+    def action_cursor_left(self) -> None:
+        self.post_message(self.TitlePageRequested(self, -1))
+
+    def action_cursor_right(self) -> None:
+        self.post_message(self.TitlePageRequested(self, 1))
+
+    def on_resize(self, _event: events.Resize) -> None:
+        self.post_message(self.ViewportResized(self))
 
 
 class SessionModeScreen(ModalScreen[SessionMode]):
@@ -538,6 +565,7 @@ class AuenApp(App[None]):
         self.current_session_mode = SessionMode(self.config.session_mode)
         self.search_results: dict[str, Track] = {}
         self._result_order: list[Track] = []
+        self._title_pages: dict[tuple[str, str], int] = {}
         self._last_saved_position = 0.0
 
     def compose(self) -> ComposeResult:
@@ -546,10 +574,10 @@ class AuenApp(App[None]):
         with Horizontal(id="workspace"):
             with Vertical(classes="pane", id="results-pane"):
                 yield Label("⌕ Results · 0", classes="pane-title", id="results-title")
-                yield DataTable(id="results", cursor_type="row")
+                yield TrackTable(id="results", cursor_type="row")
             with Vertical(classes="pane", id="queue-pane"):
                 yield Label("≡ Queue · 0", classes="pane-title", id="queue-title")
-                yield DataTable(id="queue", cursor_type="row")
+                yield TrackTable(id="queue", cursor_type="row")
         with Vertical(id="playback-status"):
             yield Static("○ Nothing playing", id="now-playing")
             with Horizontal(id="progress-row"):
@@ -576,11 +604,17 @@ class AuenApp(App[None]):
 
     def on_mount(self) -> None:
         results = self.query_one("#results", DataTable)
-        results.add_columns("Title", "Duration")
+        results.cell_padding = 0
+        results.add_column("Title", width=10, key="title")
+        results.add_column("Time", width=7, key="time")
         results.zebra_stripes = True
         queue = self.query_one("#queue", DataTable)
-        queue.add_columns("Title", "Source", "Availability")
+        queue.cell_padding = 0
+        queue.add_column("Title", width=10, key="title")
+        queue.add_column("Source", width=7, key="source")
+        queue.add_column("Status", width=9, key="status")
         queue.zebra_stripes = True
+        self.call_after_refresh(self._sync_table_widths)
         self._refresh_queue()
         self.set_interval(0.5, self._refresh_playback_status)
         if self.current_session_mode is SessionMode.ASK:
@@ -600,6 +634,19 @@ class AuenApp(App[None]):
             self.query_one("#results", DataTable).clear()
             self.search_media(event.value)
 
+    @on(TrackTable.TitlePageRequested)
+    def title_page_requested(self, event: TrackTable.TitlePageRequested) -> None:
+        self._shift_title(event.table, event.delta)
+
+    @on(TrackTable.ViewportResized)
+    def table_viewport_resized(self, event: TrackTable.ViewportResized) -> None:
+        self._sync_table_width(event.table)
+
+    @on(events.DescendantBlur)
+    def reset_title_after_table_blur(self, event: events.DescendantBlur) -> None:
+        if isinstance(event.widget, TrackTable):
+            self._reset_title_pages(event.widget)
+
     @work(exclusive=True, group="youtube-search")
     async def search_media(self, query: str) -> None:
         try:
@@ -613,10 +660,18 @@ class AuenApp(App[None]):
     def _show_results(self, tracks: list[Track]) -> None:
         table = self.query_one("#results", DataTable)
         table.clear()
+        self._title_pages = {
+            key: page for key, page in self._title_pages.items() if key[0] != "results"
+        }
         self._result_order = tracks
         self.search_results = {track.track_id: track for track in tracks}
+        title_width = self._table_title_width(table)
         for track in tracks:
-            table.add_row(track.title, track.duration_display or "-", key=track.track_id)
+            table.add_row(
+                _isolate_ltr(_title_window(track.title, title_width, 0)[0]),
+                track.duration_display or "-",
+                key=track.track_id,
+            )
         self.query_one("#results-title", Label).update(f"⌕ Results · {len(tracks)}")
         if not tracks:
             self.notify("No matching videos found", title="Search")
@@ -650,10 +705,14 @@ class AuenApp(App[None]):
     def _refresh_queue(self) -> None:
         table = self.query_one("#queue", DataTable)
         table.clear()
+        self._title_pages = {
+            key: page for key, page in self._title_pages.items() if key[0] != "queue"
+        }
+        title_width = self._table_title_width(table)
         for position, track in enumerate(self.session.playlist.queue_list):
             availability = "✓ offline" if track.is_cached else "↗ stream"
             table.add_row(
-                track.title,
+                _isolate_ltr(_title_window(track.title, title_width, 0)[0]),
                 track.source.name.casefold(),
                 availability,
                 key=f"{track.track_id}:{position}",
@@ -661,6 +720,94 @@ class AuenApp(App[None]):
         self.query_one("#queue-title", Label).update(
             f"≡ Queue · {self.session.playlist.queue_length}"
         )
+
+    def _shift_title(self, table: DataTable[object], delta: int) -> None:
+        row = table.cursor_row
+        if row < 0:
+            return
+        if table.id == "results":
+            if row >= len(self._result_order):
+                return
+            track = self._result_order[row]
+            row_key = track.track_id
+        else:
+            queue = self.session.playlist.queue_list
+            if row >= len(queue):
+                return
+            track = queue[row]
+            row_key = f"{track.track_id}:{row}"
+
+        page_key = (table.id or "", row_key)
+        requested = self._title_pages.get(page_key, 0) + delta
+        rendered, page = _title_window(track.title, self._table_title_width(table), requested)
+        self._title_pages[page_key] = page
+        table.update_cell(row_key, "title", _isolate_ltr(rendered), update_width=False)
+
+    def _table_title_width(self, table: DataTable[object]) -> int:
+        reserved = 8 if table.id == "results" else 17
+        return max(6, table.size.width - reserved)
+
+    def _reset_title_pages(self, table: DataTable[object]) -> None:
+        table_id = table.id or ""
+        self._title_pages = {
+            key: page for key, page in self._title_pages.items() if key[0] != table_id
+        }
+        table.scroll_x = 0
+        title_width = self._table_title_width(table)
+        if table_id == "results":
+            rows = ((track.track_id, track) for track in self._result_order)
+        else:
+            rows = (
+                (f"{track.track_id}:{position}", track)
+                for position, track in enumerate(self.session.playlist.queue_list)
+            )
+        for row_key, track in rows:
+            table.update_cell(
+                row_key,
+                "title",
+                _isolate_ltr(_title_window(track.title, title_width, 0)[0]),
+                update_width=False,
+            )
+
+    def _sync_table_widths(self) -> None:
+        """Give titles the remaining pane width after compact metadata columns."""
+        self._sync_table_width(self.query_one("#results", TrackTable))
+        self._sync_table_width(self.query_one("#queue", TrackTable))
+
+    def _sync_table_width(self, table: DataTable[object]) -> None:
+        if not table.ordered_columns:
+            return
+        table.ordered_columns[0].width = self._table_title_width(table)
+        table.refresh(layout=True)
+
+        if table.id == "results":
+            for row, track in enumerate(self._result_order):
+                if row >= table.row_count:
+                    break
+                page_key = ("results", track.track_id)
+                rendered, page = _title_window(
+                    track.title,
+                    self._table_title_width(table),
+                    self._title_pages.get(page_key, 0),
+                )
+                self._title_pages[page_key] = page
+                table.update_cell(
+                    track.track_id, "title", _isolate_ltr(rendered), update_width=False
+                )
+            return
+
+        for row, track in enumerate(self.session.playlist.queue_list):
+            if row >= table.row_count:
+                break
+            row_key = f"{track.track_id}:{row}"
+            page_key = ("queue", row_key)
+            rendered, page = _title_window(
+                track.title,
+                self._table_title_width(table),
+                self._title_pages.get(page_key, 0),
+            )
+            self._title_pages[page_key] = page
+            table.update_cell(row_key, "title", _isolate_ltr(rendered), update_width=False)
 
     def _download_finished(self, future: object) -> None:
         try:
@@ -758,6 +905,22 @@ class AuenApp(App[None]):
 
     def action_focus_search(self) -> None:
         self.query_one("#search-bar", Input).focus()
+
+    def action_leave_search(self) -> None:
+        results = self.query_one("#results", DataTable)
+        target = results if self._result_order else self.query_one("#queue", DataTable)
+        target.focus()
+
+    def action_focus_next(self) -> None:
+        if self.screen.id != "_default":
+            super().action_focus_next()
+            return
+        results = self.query_one("#results", DataTable)
+        queue = self.query_one("#queue", DataTable)
+        (queue if results.has_focus else results).focus()
+
+    def action_focus_previous(self) -> None:
+        self.action_focus_next()
 
     def action_settings(self) -> None:
         self.push_screen(SettingsScreen(self.config), self._settings_closed)
@@ -903,3 +1066,23 @@ def _format_timestamp(seconds: float | None) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def _title_window(value: str, width: int, page: int) -> tuple[str, int]:
+    """Return one display-cell-safe page of a title and its clamped page index."""
+    if width < 1:
+        return "", 0
+    if cell_len(value) <= width:
+        return value, 0
+    if width == 1:
+        return "…", 0
+    chunks = chop_cells(value, max(1, width - 2))
+    selected = min(max(0, page), len(chunks) - 1)
+    left = "←" if selected else ""
+    right = "→" if selected < len(chunks) - 1 else ""
+    return f"{left}{chunks[selected].rstrip()}{right}", selected
+
+
+def _isolate_ltr(value: str) -> str:
+    """Keep bidirectional title text from reordering adjacent table columns."""
+    return f"\N{LEFT-TO-RIGHT ISOLATE}{value}\N{POP DIRECTIONAL ISOLATE}"

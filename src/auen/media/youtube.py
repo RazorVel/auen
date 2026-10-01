@@ -92,7 +92,7 @@ class YouTubeService:
             with YoutubeDL(options) as ydl:
                 result = ydl.extract_info(target, download=False)
         except DownloadError as exc:
-            raise YouTubeServiceError(str(exc)) from exc
+            raise YouTubeServiceError(_user_facing_error(exc)) from exc
         if not isinstance(result, dict):
             raise YouTubeServiceError("YouTube returned an invalid response")
         return result
@@ -125,3 +125,16 @@ def _format_duration(seconds: float | None) -> str | None:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def _user_facing_error(error: DownloadError) -> str:
+    message = str(error)
+    if (
+        "Sign in to confirm you\u2019re not a bot" in message
+        or "Sign in to confirm you're not a bot" in message
+    ):
+        return (
+            "YouTube requires sign-in for this video. Try another result for now; "
+            "browser-cookie support is not configured yet."
+        )
+    return message

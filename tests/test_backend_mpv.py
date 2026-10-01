@@ -27,6 +27,10 @@ def test_mpv_play_starts_process(
     args = mock_popen.call_args[0][0]
     assert args[0] == "mpv"
     assert "http://stream" in args
+    assert "--cache=yes" in args
+    assert "--cache-pause-initial=yes" in args
+    assert "--cache-pause-wait=3" in args
+    assert "--demuxer-readahead-secs=30" in args
     assert backend._is_playing is True
     mock_thread.assert_called_once()
 

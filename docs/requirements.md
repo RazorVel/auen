@@ -101,8 +101,27 @@ Settings. Offline mode should remain useful when the network is unavailable.
 
 - A successful search moves focus to its results so Up, Down, and Enter work without an
   extra navigation step. Search loading and empty states remain visible.
+- Escape from the search field cancels the active UI search when possible and returns
+  focus to results, or to the queue when no results exist. A bounded extractor already in
+  progress may finish silently; cancellation must not create another worker.
+- On the main screen, Tab and Shift+Tab alternate only between the active left workspace
+  table and Queue. Search is entered with `/` or a click/tap and left with Escape.
+- Results, Downloads/Offline Library, History, and Playlists share the left workspace;
+  switching views never hides Queue or the playback controls.
+- A compact download-status strip reports active, queued, completed, and failed work.
+  Activating it, or using the Library shortcut, opens download management and pinned
+  offline tracks in the left workspace.
+- The first search page adapts to the visible result-pane capacity while respecting a
+  safe upper bound. Reaching the end offers an explicit confirmation to load the next
+  page; additional results are never fetched merely because the cursor moved.
 - Search titles are ellipsized to preserve the duration column. Highlighting a result
   exposes its full title and source without requiring a wide terminal.
+- Table clipping and ellipsizing use terminal display-cell width so wide characters,
+  combining marks, and right-to-left scripts cannot paint beyond pane boundaries.
+- Directional isolation keeps right-to-left titles from reordering duration or status
+  columns. Leaving a table resets any paged title to its leftmost segment.
+- Table widths refresh from each pane's final viewport size after every terminal resize;
+  repeated shrinking and expansion must never leave columns one resize behind.
 - `Ctrl+A` selects all text in editable fields. Widget navigation keys must not silently
   conflict with playback controls.
 - Seeking has visible, focusable controls in addition to shortcuts. Left and Right remain

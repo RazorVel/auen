@@ -1,8 +1,9 @@
 """Tests for YouTube search and stream resolution."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from yt_dlp.utils import DownloadError
 
 from auen.media.youtube import YouTubeService, YouTubeServiceError, is_youtube_url
 from auen.models import Track, TrackSource
@@ -80,3 +81,20 @@ def test_resolve_requires_playable_stream() -> None:
         pytest.raises(YouTubeServiceError, match="playable"),
     ):
         service.resolve(track)
+
+
+def test_bot_challenge_has_concise_actionable_error() -> None:
+    service = YouTubeService()
+    extractor = MagicMock()
+    extractor.extract_info.side_effect = DownloadError(
+        "ERROR: [youtube] abc: Sign in to confirm you\u2019re not a bot. Use --cookies."
+    )
+
+    with (
+        patch("auen.media.youtube.YoutubeDL") as youtube_dl,
+        pytest.raises(YouTubeServiceError, match="requires sign-in") as raised,
+    ):
+        youtube_dl.return_value.__enter__.return_value = extractor
+        service.search("blocked")
+
+    assert "ERROR:" not in str(raised.value)

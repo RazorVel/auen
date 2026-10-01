@@ -3,6 +3,7 @@
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -126,9 +127,33 @@ def test_cache_mode_schedules_background_download(tmp_path: Path) -> None:
         config, state=state, cache=cache, downloads=downloads, youtube=youtube
     ) as session:
         future = session.enqueue(track, session_mode=SessionMode.STREAM_AND_CACHE)
+        assert future is not None
+        future.result(timeout=1)
 
-    assert future is not None
     downloads.submit.assert_called_once_with(track)
+
+
+def test_automatic_queue_caching_is_serialized(tmp_path: Path) -> None:
+    state, cache, downloads = make_dependencies(tmp_path)
+    config = AuenConfig(config_dir=tmp_path, cache_dir=tmp_path / "cache")
+    first_download: Future[object] = Future()
+    second_download: Future[object] = Future()
+    downloads.submit = MagicMock(  # type: ignore[method-assign]
+        side_effect=[first_download, second_download]
+    )
+
+    with AuenSession(config, state=state, cache=cache, downloads=downloads) as session:
+        first = session.enqueue(make_track("first"), session_mode=SessionMode.STREAM_AND_CACHE)
+        second = session.enqueue(make_track("second"), session_mode=SessionMode.STREAM_AND_CACHE)
+        assert first is not None
+        assert second is not None
+        wait_until(lambda: downloads.submit.call_count == 1)
+
+        first_download.set_result(MagicMock())
+        wait_until(lambda: downloads.submit.call_count == 2)
+        second_download.set_result(MagicMock())
+        first.result(timeout=1)
+        second.result(timeout=1)
 
 
 def test_playback_changes_are_persisted_from_worker_thread(tmp_path: Path) -> None:

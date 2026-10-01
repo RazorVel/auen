@@ -2,6 +2,7 @@
 
 import random
 import threading
+import time
 from collections import deque
 from collections.abc import Iterable
 
@@ -33,27 +34,28 @@ class Playlist:
 
     def next(self, timeout: float | None = None) -> Track | None:
         """Block until a track is available or timeout. Returns None on timeout."""
-        if not self._available.wait(timeout):
-            return None
-
-        with self._lock:
-            if not self._queue:
-                self._available.clear()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if not self._available.wait(remaining):
                 return None
 
-            if self.shuffle and len(self._queue) > 1:
-                # Pick random track from queue (except head unless we have to,
-                # but simple random choice from entire queue is fine here)
-                idx = random.randrange(len(self._queue))
-                # Swap it to the front so we can popleft
-                self._queue[0], self._queue[idx] = self._queue[idx], self._queue[0]
+            with self._lock:
+                # Several consumers may wake for one item. A consumer that loses that
+                # race must keep waiting rather than count the wake-up as a timeout.
+                if not self._queue:
+                    self._available.clear()
+                    continue
 
-            track = self._queue.popleft()
+                if self.shuffle and len(self._queue) > 1:
+                    idx = random.randrange(len(self._queue))
+                    self._queue[0], self._queue[idx] = self._queue[idx], self._queue[0]
 
-            if not self._queue:
-                self._available.clear()
+                track = self._queue.popleft()
+                if not self._queue:
+                    self._available.clear()
 
-            return track
+                return track
 
     def peek(self) -> Track | None:
         with self._lock:

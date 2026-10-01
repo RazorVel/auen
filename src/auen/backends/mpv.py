@@ -37,6 +37,11 @@ class MpvBackend(AudioBackend):
             cmd = [
                 "mpv",
                 "--no-video",
+                "--cache=yes",
+                "--cache-pause=yes",
+                "--cache-pause-initial=yes",
+                "--cache-pause-wait=3",
+                "--demuxer-readahead-secs=30",
                 f"--input-ipc-server={self._socket_path}",
                 "--quiet",
                 uri,

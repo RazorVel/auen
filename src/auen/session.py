@@ -45,6 +45,9 @@ class AuenSession:
         )
         self.youtube = youtube or YouTubeService()
         self._search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="auen-search")
+        self._auto_cache_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="auen-auto-cache"
+        )
         self.playlist = Playlist()
         self.current_track: Track | None = None
         self.elapsed_seconds = 0.0
@@ -83,8 +86,12 @@ class AuenSession:
         self.playlist.add(track)
         self.save()
         if session_mode is SessionMode.STREAM_AND_CACHE and not track.is_cached:
-            return self.downloads.submit(track)
+            return self._auto_cache_executor.submit(self._cache_queued_track, track)
         return None
+
+    def _cache_queued_track(self, track: Track) -> CacheEntry:
+        """Serialize automatic caching so it cannot saturate playback bandwidth."""
+        return self.downloads.submit(track).result()
 
     def set_session_mode(self, mode: SessionMode) -> None:
         """Set remote-media behavior for the rest of this running session."""
@@ -189,6 +196,7 @@ class AuenSession:
             self.player.close()
         self.save()
         self._search_executor.shutdown(wait=True, cancel_futures=True)
+        self._auto_cache_executor.shutdown(wait=True, cancel_futures=True)
         self.downloads.close(wait=True, cancel_pending=True)
         self.cache.close()
         self.state.close()
