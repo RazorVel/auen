@@ -1,12 +1,16 @@
 """Tests for application-level media and recovery coordination."""
 
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from auen.backends.base import AudioBackend, BackendCapabilities
 from auen.cache import CacheManager
 from auen.config import AuenConfig
 from auen.downloads import DownloadManager
-from auen.models import SessionMode, Track, TrackSource
+from auen.models import PlaybackState, PlaybackStatus, SessionMode, Track, TrackSource
 from auen.session import AuenSession
 from auen.state import StateStore
 
@@ -23,6 +27,57 @@ def make_track(title: str) -> Track:
         source=TrackSource.YOUTUBE,
         uri=f"https://youtube.com/watch?v={title}",
     )
+
+
+class FakeBackend(AudioBackend):
+    def __init__(self) -> None:
+        self.played: list[str] = []
+        self.ended = threading.Event()
+        self.state = PlaybackState.STOPPED
+        self.volume = 80
+
+    def play(self, uri: str) -> None:
+        self.played.append(uri)
+        self.state = PlaybackState.PLAYING
+        self.ended.clear()
+
+    def pause(self) -> None:
+        self.state = PlaybackState.PAUSED
+
+    def resume(self) -> None:
+        self.state = PlaybackState.PLAYING
+
+    def stop(self) -> None:
+        self.state = PlaybackState.STOPPED
+        self.ended.set()
+
+    def get_status(self) -> PlaybackStatus:
+        return PlaybackStatus(state=self.state, volume=self.volume)
+
+    def set_volume(self, level: int) -> None:
+        self.volume = level
+
+    def seek(self, _seconds: float) -> None:
+        pass
+
+    def wait_for_end(self, timeout: float | None = None) -> bool:
+        return self.ended.wait(timeout)
+
+    @property
+    def name(self) -> str:
+        return "fake"
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(True, True, True, True)
+
+
+def wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition was not reached in time")
+        time.sleep(0.01)
 
 
 def test_search_delegates_query_and_youtube_url(tmp_path: Path) -> None:
@@ -74,3 +129,28 @@ def test_cache_mode_schedules_background_download(tmp_path: Path) -> None:
 
     assert future is not None
     downloads.submit.assert_called_once_with(track)
+
+
+def test_playback_changes_are_persisted_from_worker_thread(tmp_path: Path) -> None:
+    state, cache, downloads = make_dependencies(tmp_path)
+    config = AuenConfig(
+        config_dir=tmp_path,
+        cache_dir=tmp_path / "cache",
+        session_mode=SessionMode.STREAM_ONLY.value,
+    )
+    track = Track(title="local", source=TrackSource.LOCAL, uri="/music/local.opus")
+    backend = FakeBackend()
+
+    with AuenSession(config, state=state, cache=cache, downloads=downloads) as session:
+        session.enqueue(track)
+        session.start_playback(backend)
+        wait_until(lambda: backend.played == [track.uri])
+        assert session.current_track is track
+
+        backend.ended.set()
+        wait_until(lambda: session.playlist.history_list == [track])
+        wait_until(lambda: session.current_track is None)
+        snapshot = session.state.load()
+
+        assert snapshot.current_track is None
+        assert [item.track_id for item in snapshot.history] == [track.track_id]

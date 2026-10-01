@@ -2,9 +2,17 @@
 
 from pathlib import Path
 
-from textual.widgets import DataTable, Input
+import pytest
+from textual.widgets import DataTable, Input, Label
 
-from auen.app import AuenApp, SessionModeScreen, SettingsScreen
+from auen.app import (
+    AuenApp,
+    DuplicateQueueScreen,
+    SessionModeScreen,
+    SettingsScreen,
+    _format_timestamp,
+    _parse_timestamp,
+)
 from auen.cache import CacheManager
 from auen.config import AuenConfig
 from auen.downloads import DownloadManager
@@ -75,11 +83,88 @@ async def test_search_result_can_be_selected_into_durable_queue(tmp_path: Path) 
         await app.workers.wait_for_complete()
         results = app.query_one("#results", DataTable)
         assert results.row_count == 1
+        assert results.has_focus
+        assert "Results · 1" in str(app.query_one("#results-title", Label).render())
 
-        results.focus()
         await pilot.press("enter")
         await pilot.pause()
 
         queue = app.query_one("#queue", DataTable)
         assert queue.row_count == 1
         assert app.session.playlist.queue_list[0].track_id == result.track_id
+
+
+async def test_duplicate_search_result_requires_confirmation(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    result = Track(
+        title="Repeat me",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=repeat",
+    )
+    app.session.youtube.search = lambda *_args, **_kwargs: [result]  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        search = app.query_one("#search-bar", Input)
+        search.value = "repeat"
+        search.focus()
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        queue = app.query_one("#queue", DataTable)
+        assert isinstance(app.screen, DuplicateQueueScreen)
+        assert queue.row_count == 1
+
+        await pilot.click("#confirm-duplicate")
+        await pilot.pause()
+
+        assert queue.row_count == 2
+        assert app.session.playlist.queue_list == [result, result]
+
+
+async def test_duplicate_queue_confirmation_can_be_cancelled(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    result = Track(
+        title="Only once",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=once",
+    )
+    app.session.youtube.search = lambda *_args, **_kwargs: [result]  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        search = app.query_one("#search-bar", Input)
+        search.value = "once"
+        search.focus()
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.query_one("#queue", DataTable).row_count == 1
+        assert app.session.playlist.queue_list == [result]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("90", 90), ("1:30", 90), ("1:02:15", 3735), ("2.5", 2.5)],
+)
+def test_parse_timestamp(value: str, expected: float) -> None:
+    assert _parse_timestamp(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", "nope", "1:70", "-1", "1:2:3:4", "nan", "inf"])
+def test_parse_timestamp_rejects_invalid_values(value: str) -> None:
+    with pytest.raises(ValueError):
+        _parse_timestamp(value)
+
+
+def test_format_timestamp() -> None:
+    assert _format_timestamp(90) == "1:30"
+    assert _format_timestamp(3735) == "1:02:15"

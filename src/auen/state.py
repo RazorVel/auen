@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,8 @@ class StateStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or Path(user_state_dir("auen")) / "state.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.path, timeout=5.0)
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode = WAL")
         self._connection.execute("PRAGMA synchronous = FULL")
@@ -66,7 +68,7 @@ class StateStore:
 
     def save(self, snapshot: SessionSnapshot) -> None:
         """Replace the saved session in one durable transaction."""
-        with self._connection:
+        with self._lock, self._connection:
             self._connection.execute("DELETE FROM queue_items")
             self._connection.executemany(
                 "INSERT INTO queue_items(position, track) VALUES (?, ?)",
@@ -110,23 +112,24 @@ class StateStore:
 
     def load(self) -> SessionSnapshot:
         """Load the last complete snapshot, or an empty session on first use."""
-        row = self._connection.execute("SELECT * FROM session WHERE id = 1").fetchone()
-        if row is None:
-            return SessionSnapshot()
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM session WHERE id = 1").fetchone()
+            if row is None:
+                return SessionSnapshot()
 
-        queue = [
-            _decode_track(item["track"])
-            for item in self._connection.execute(
-                "SELECT track FROM queue_items ORDER BY position"
-            ).fetchall()
-        ]
-        history = [
-            _decode_track(item["track"])
-            for item in self._connection.execute(
-                "SELECT track FROM history_items ORDER BY position"
-            ).fetchall()
-        ]
-        current_track = _decode_track(row["current_track"]) if row["current_track"] else None
+            queue = [
+                _decode_track(item["track"])
+                for item in self._connection.execute(
+                    "SELECT track FROM queue_items ORDER BY position"
+                ).fetchall()
+            ]
+            history = [
+                _decode_track(item["track"])
+                for item in self._connection.execute(
+                    "SELECT track FROM history_items ORDER BY position"
+                ).fetchall()
+            ]
+            current_track = _decode_track(row["current_track"]) if row["current_track"] else None
 
         return SessionSnapshot(
             queue=queue,
@@ -139,13 +142,14 @@ class StateStore:
 
     def clear(self) -> None:
         """Forget session recovery data without touching settings or media."""
-        with self._connection:
+        with self._lock, self._connection:
             self._connection.execute("DELETE FROM session")
             self._connection.execute("DELETE FROM queue_items")
             self._connection.execute("DELETE FROM history_items")
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def __enter__(self) -> StateStore:
         return self

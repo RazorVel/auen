@@ -96,3 +96,34 @@ The main screen contains a search/URL field, selectable result list, queue, and 
 now-playing area. It exposes search, queueing, play-next, download/pin, shuffle, repeat,
 progress, download state, and help through discoverable keyboard actions. `F2` opens
 Settings. Offline mode should remain useful when the network is unavailable.
+
+## Interaction and responsive UX
+
+- A successful search moves focus to its results so Up, Down, and Enter work without an
+  extra navigation step. Search loading and empty states remain visible.
+- Search titles are ellipsized to preserve the duration column. Highlighting a result
+  exposes its full title and source without requiring a wide terminal.
+- `Ctrl+A` selects all text in editable fields. Widget navigation keys must not silently
+  conflict with playback controls.
+- Seeking has visible, focusable controls in addition to shortcuts. Left and Right remain
+  available to text fields and tables; playback uses unambiguous shortcuts and buttons.
+- A dedicated theme picker previews each highlighted theme. Enter persists the theme;
+  Escape restores the theme active when the picker opened.
+- The main navigation exposes Queue, recently played History, Offline Library, and named
+  Playlists as first-class destinations rather than hidden commands.
+- The Offline Library lists pinned, locally playable tracks and supports play, queue,
+  unpin, and explicit deletion with confirmation.
+- Named playlists are durable ordered collections distinct from the transient playback
+  queue. Tracks can be added from search, history, or the offline library.
+- A `:` command entry inside the TUI provides keyboard-compatible forms of the legacy
+  workflow, including search, URL, local file/directory import, play, pause, next, seek,
+  queue, history, library, playlist, shuffle, repeat, theme, settings, help, and quit.
+- A pure prompt-oriented entry point may reuse the same command dispatcher; commands must
+  call session services rather than duplicate playback or persistence logic.
+- Layout responds to terminal cell dimensions. Wide terminals may show results and queue
+  together; narrow terminals use one pane at a time with compact focusable controls and
+  reduced columns. The application does not change terminal font size or zoom, which are
+  controlled by the terminal emulator.
+- Responsive behavior is tested at desktop and phone-sized terminal dimensions. Unicode
+  decoration must have a plain-text fallback or remain understandable when a glyph is
+  unavailable.

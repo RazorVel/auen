@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import TYPE_CHECKING, ClassVar
 
 from textual import on, work
@@ -16,17 +17,21 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    ProgressBar,
     Select,
     Static,
     Switch,
 )
 
+from auen.backends import detect_backend
 from auen.config import AuenConfig
-from auen.models import RepeatMode, SessionMode, Track
+from auen.models import PlaybackState, RepeatMode, SessionMode, Track
 from auen.session import AuenSession
 
 if TYPE_CHECKING:
     from textual.binding import BindingType
+
+    from auen.backends.base import AudioBackend
 
 
 class SessionModeScreen(ModalScreen[SessionMode]):
@@ -67,6 +72,116 @@ class SessionModeScreen(ModalScreen[SessionMode]):
             self.dismiss(SessionMode.STREAM_ONLY)
         elif event.button.id == "stream-cache":
             self.dismiss(SessionMode.STREAM_AND_CACHE)
+
+
+class DuplicateQueueScreen(ModalScreen[bool]):
+    """Confirm intentionally adding another occurrence of a queued track."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    DuplicateQueueScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #duplicate-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+    #duplicate-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #duplicate-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, track: Track) -> None:
+        super().__init__()
+        self.track = track
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="duplicate-dialog"):
+            yield Label("Already in queue", classes="dialog-title")
+            yield Static(f"“{self.track.title}” is already queued. Add it again?")
+            with Horizontal(id="duplicate-actions"):
+                yield Button("Cancel", id="cancel-duplicate", variant="default")
+                yield Button("Add again", id="confirm-duplicate", variant="warning")
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel-duplicate", Button).focus()
+
+    @on(Button.Pressed, "#cancel-duplicate")
+    def cancel_pressed(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-duplicate")
+    def confirm_pressed(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class SeekScreen(ModalScreen[float | None]):
+    """Prompt for an absolute playback position."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    SeekScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #seek-dialog {
+        width: 54;
+        height: auto;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #seek-time {
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, duration_seconds: float | None) -> None:
+        super().__init__()
+        self.duration_seconds = duration_seconds
+
+    def compose(self) -> ComposeResult:
+        limit = (
+            f" Track length: {_format_timestamp(self.duration_seconds)}."
+            if self.duration_seconds is not None
+            else ""
+        )
+        with Vertical(id="seek-dialog"):
+            yield Label("Go to time", classes="dialog-title")
+            yield Static(f"Enter seconds, mm:ss, or hh:mm:ss.{limit}")
+            yield Input(placeholder="Example: 90 or 1:30", id="seek-time")
+
+    def on_mount(self) -> None:
+        self.query_one("#seek-time", Input).focus()
+
+    @on(Input.Submitted, "#seek-time")
+    def submit_time(self, event: Input.Submitted) -> None:
+        try:
+            seconds = _parse_timestamp(event.value)
+        except ValueError as exc:
+            self.notify(str(exc), title="Invalid time", severity="error")
+            return
+        if self.duration_seconds is not None and seconds > self.duration_seconds:
+            self.notify("Time is past the end of this track", severity="error")
+            return
+        self.dismiss(seconds)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class SettingsScreen(Screen[bool]):
@@ -219,9 +334,7 @@ class SettingsScreen(Screen[bool]):
         self.config.session_mode = str(self.query_one("#session-mode", Select).value)
         self.config.repeat_mode = str(self.query_one("#repeat-mode", Select).value)
         self.config.volume = self._integer_value("#volume", "volume")
-        self.config.search_result_count = self._integer_value(
-            "#search-results", "search results"
-        )
+        self.config.search_result_count = self._integer_value("#search-results", "search results")
         cache_mebibytes = self._integer_value("#cache-limit", "cache limit")
         self.config.cache_max_bytes = cache_mebibytes * 1024**2
         self.config.max_download_threads = self._integer_value(
@@ -246,11 +359,16 @@ class AuenApp(App[None]):
     TITLE = "auen"
     SUB_TITLE = "terminal audio"
     BINDINGS: ClassVar[list[BindingType]] = [
-        ("/", "focus_search", "Search"),
-        ("d", "download_selected", "Save offline"),
-        ("delete", "remove_queued", "Remove queued"),
-        ("f2", "settings", "Settings"),
-        ("q", "quit", "Quit"),
+        ("/", "focus_search", "⌕ Search"),
+        ("space", "toggle_playback", "▶/Ⅱ Play"),
+        ("n", "next_track", "» Next"),
+        ("left", "seek_backward", "← 10s"),
+        ("right", "seek_forward", "10s →"),
+        ("g", "go_to_time", "↪ Time"),
+        ("d", "download_selected", "↓ Offline"),
+        ("delete", "remove_queued", "Del Remove"),
+        ("f2", "settings", "⚙ Settings"),
+        ("q", "quit", "q Quit"),
     ]
 
     CSS = """
@@ -274,15 +392,38 @@ class AuenApp(App[None]):
     .pane-title {
         text-style: bold;
         margin-bottom: 1;
+        color: $accent;
     }
     DataTable {
         height: 1fr;
+        background: $surface;
+    }
+    #playback-status {
+        dock: bottom;
+        height: 5;
+        padding: 0 2;
+        background: $panel;
     }
     #now-playing {
-        dock: bottom;
-        height: 3;
-        padding: 1 2;
-        background: $panel;
+        height: 2;
+        padding-top: 1;
+    }
+    #progress-row {
+        height: 1;
+    }
+    #playback-progress {
+        width: 1fr;
+        height: 1;
+    }
+    #playback-time {
+        width: 18;
+        height: 1;
+        text-align: right;
+    }
+    #playback-controls {
+        height: 1;
+        color: $text-muted;
+        text-align: center;
     }
     """
 
@@ -291,35 +432,62 @@ class AuenApp(App[None]):
         config: AuenConfig | None = None,
         *,
         session: AuenSession | None = None,
+        backend: AudioBackend | None = None,
+        backend_error: str | None = None,
     ) -> None:
         super().__init__()
         self.config = config or AuenConfig.load()
         self.session = session or AuenSession(self.config)
+        self.backend = backend
+        self.backend_error = backend_error
+        self.session.on_track_changed = self._playback_track_changed
+        self.session.on_playback_error = self._playback_failed
         self.current_session_mode = SessionMode(self.config.session_mode)
         self.search_results: dict[str, Track] = {}
         self._result_order: list[Track] = []
+        self._last_saved_position = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Input(placeholder="Search YouTube or paste a YouTube URL…", id="search-bar")
         with Horizontal(id="workspace"):
             with Vertical(classes="pane", id="results-pane"):
-                yield Label("Search results", classes="pane-title")
+                yield Label("⌕ Results · 0", classes="pane-title", id="results-title")
                 yield DataTable(id="results", cursor_type="row")
             with Vertical(classes="pane", id="queue-pane"):
-                yield Label("Queue", classes="pane-title")
+                yield Label("≡ Queue · 0", classes="pane-title", id="queue-title")
                 yield DataTable(id="queue", cursor_type="row")
-        yield Static("Nothing playing", id="now-playing")
+        with Vertical(id="playback-status"):
+            yield Static("○ Nothing playing", id="now-playing")
+            with Horizontal(id="progress-row"):
+                yield ProgressBar(
+                    total=1,
+                    show_percentage=False,
+                    show_eta=False,
+                    id="playback-progress",
+                )
+                yield Static("0:00 / --:--", id="playback-time")
+            yield Static(
+                "← -10s    ␣ play/pause    +10s →    g jump    n next",
+                id="playback-controls",
+            )
         yield Footer()
 
     def on_mount(self) -> None:
         results = self.query_one("#results", DataTable)
         results.add_columns("Title", "Duration")
+        results.zebra_stripes = True
         queue = self.query_one("#queue", DataTable)
         queue.add_columns("Title", "Source", "Availability")
+        queue.zebra_stripes = True
         self._refresh_queue()
+        self.set_interval(0.5, self._refresh_playback_status)
         if self.current_session_mode is SessionMode.ASK:
             self.push_screen(SessionModeScreen(), self._session_mode_selected)
+        else:
+            self._start_player()
+        if self.backend_error is not None:
+            self.notify(self.backend_error, title="Playback unavailable", severity="warning")
 
     def on_unmount(self) -> None:
         self.session.close()
@@ -327,6 +495,8 @@ class AuenApp(App[None]):
     @on(Input.Submitted, "#search-bar")
     def search_submitted(self, event: Input.Submitted) -> None:
         if event.value.strip():
+            self.query_one("#results-title", Label).update("⌕ Searching…")
+            self.query_one("#results", DataTable).clear()
             self.search_media(event.value)
 
     @work(exclusive=True, group="youtube-search")
@@ -334,6 +504,7 @@ class AuenApp(App[None]):
         try:
             tracks = await asyncio.wrap_future(self.session.submit_search(query))
         except (OSError, RuntimeError, ValueError) as exc:
+            self.query_one("#results-title", Label).update("⌕ Results · 0")
             self.notify(str(exc), title="Search failed", severity="error")
             return
         self._show_results(tracks)
@@ -345,14 +516,30 @@ class AuenApp(App[None]):
         self.search_results = {track.track_id: track for track in tracks}
         for track in tracks:
             table.add_row(track.title, track.duration_display or "-", key=track.track_id)
+        self.query_one("#results-title", Label).update(f"⌕ Results · {len(tracks)}")
         if not tracks:
             self.notify("No matching videos found", title="Search")
+        else:
+            table.focus()
 
     @on(DataTable.RowSelected, "#results")
     def result_selected(self, event: DataTable.RowSelected) -> None:
         track = self.search_results.get(str(event.row_key.value))
         if track is None:
             return
+        if any(queued.uri == track.uri for queued in self.session.playlist.queue_list):
+            self.push_screen(
+                DuplicateQueueScreen(track),
+                lambda confirmed: self._duplicate_queue_decided(track, confirmed),
+            )
+            return
+        self._enqueue_track(track)
+
+    def _duplicate_queue_decided(self, track: Track, confirmed: bool | None) -> None:
+        if confirmed:
+            self._enqueue_track(track)
+
+    def _enqueue_track(self, track: Track) -> None:
         future = self.session.enqueue(track, session_mode=self.current_session_mode)
         self._refresh_queue()
         self.notify(track.title, title="Added to queue")
@@ -362,14 +549,17 @@ class AuenApp(App[None]):
     def _refresh_queue(self) -> None:
         table = self.query_one("#queue", DataTable)
         table.clear()
-        for track in self.session.playlist.queue_list:
-            availability = "offline" if track.is_cached else "stream"
+        for position, track in enumerate(self.session.playlist.queue_list):
+            availability = "✓ offline" if track.is_cached else "↗ stream"
             table.add_row(
                 track.title,
                 track.source.name.casefold(),
                 availability,
-                key=track.track_id,
+                key=f"{track.track_id}:{position}",
             )
+        self.query_one("#queue-title", Label).update(
+            f"≡ Queue · {self.session.playlist.queue_length}"
+        )
 
     def _download_finished(self, future: object) -> None:
         try:
@@ -392,9 +582,77 @@ class AuenApp(App[None]):
     def _session_mode_selected(self, mode: SessionMode | None) -> None:
         if mode is not None:
             self.current_session_mode = mode
+            self.session.set_session_mode(mode)
+            self._start_player()
             self.notify(
                 "Streaming only" if mode is SessionMode.STREAM_ONLY else "Offline cache enabled",
                 title="Session mode",
+            )
+
+    def _start_player(self) -> None:
+        if self.backend is None:
+            return
+        try:
+            self.session.start_playback(
+                self.backend,
+                session_mode=self.current_session_mode,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.notify(str(exc), title="Playback unavailable", severity="error")
+
+    def _playback_track_changed(self, track: Track | None) -> None:
+        if not self.is_running:
+            return
+        self.call_from_thread(self._show_now_playing, track)
+        self.call_from_thread(self._refresh_queue)
+
+    def _show_now_playing(self, track: Track | None) -> None:
+        message = "○ Nothing playing" if track is None else f"▶ {track.title}"
+        self.query_one("#now-playing", Static).update(message)
+        if track is None:
+            self._reset_progress()
+
+    def _refresh_playback_status(self) -> None:
+        player = self.session.player
+        track = self.session.current_track
+        if player is None or track is None:
+            self._reset_progress()
+            return
+        try:
+            status = player.status
+        except (OSError, RuntimeError, ValueError):
+            return
+
+        elapsed = max(0.0, status.elapsed_seconds)
+        state_symbol = "Ⅱ" if status.state is PlaybackState.PAUSED else "▶"
+        self.query_one("#now-playing", Static).update(f"{state_symbol} {track.title}")
+        duration = track.duration_seconds
+        total = max(1.0, duration or 1.0)
+        self.query_one("#playback-progress", ProgressBar).update(
+            total=total,
+            progress=min(elapsed, total),
+        )
+        duration_text = _format_timestamp(duration) if duration is not None else "--:--"
+        self.query_one("#playback-time", Static).update(
+            f"{_format_timestamp(elapsed)} / {duration_text}"
+        )
+        self.session.elapsed_seconds = elapsed
+        if abs(elapsed - self._last_saved_position) >= 5.0:
+            self.session.save()
+            self._last_saved_position = elapsed
+
+    def _reset_progress(self) -> None:
+        self.query_one("#playback-progress", ProgressBar).update(total=1, progress=0)
+        self.query_one("#playback-time", Static).update("0:00 / --:--")
+        self._last_saved_position = 0.0
+
+    def _playback_failed(self, track: Track, error: Exception) -> None:
+        if self.is_running:
+            self.call_from_thread(
+                self.notify,
+                str(error),
+                title=f"Could not play {track.title}",
+                severity="error",
             )
 
     def action_focus_search(self) -> None:
@@ -410,7 +668,54 @@ class AuenApp(App[None]):
         self.session.playlist.repeat_mode = RepeatMode(self.config.repeat_mode)
         self.session.cache.max_cache_bytes = self.config.cache_max_bytes
         self.session.cache.prune()
+        if self.session.player is not None:
+            self.session.player.set_volume(self.config.volume)
         self.session.save()
+
+    def action_toggle_playback(self) -> None:
+        if self.session.player is not None:
+            self.session.player.toggle_pause()
+
+    def action_next_track(self) -> None:
+        if self.session.player is not None:
+            self.session.player.skip()
+
+    def action_seek_backward(self) -> None:
+        self._seek(-10.0)
+
+    def action_seek_forward(self) -> None:
+        self._seek(10.0)
+
+    def action_go_to_time(self) -> None:
+        player = self.session.player
+        track = self.session.current_track
+        if player is None or track is None:
+            self.notify("Nothing is playing", title="Go to time", severity="warning")
+            return
+        if not player.backend.supports_seek:
+            self.notify(
+                f"{player.backend.name} does not support seeking",
+                title="Go to time",
+                severity="warning",
+            )
+            return
+        self.push_screen(SeekScreen(track.duration_seconds), self._seek_to)
+
+    def _seek_to(self, seconds: float | None) -> None:
+        if seconds is None or self.session.player is None:
+            return
+        try:
+            self.session.player.seek_to(seconds)
+        except (RuntimeError, ValueError) as exc:
+            self.notify(str(exc), title="Seek unavailable", severity="warning")
+
+    def _seek(self, seconds: float) -> None:
+        if self.session.player is None:
+            return
+        try:
+            self.session.player.seek(seconds)
+        except RuntimeError as exc:
+            self.notify(str(exc), title="Seek unavailable", severity="warning")
 
     def action_download_selected(self) -> None:
         table = self.query_one("#results", DataTable)
@@ -429,4 +734,41 @@ class AuenApp(App[None]):
 
 def run() -> None:
     """Launch the interactive application."""
-    AuenApp().run()
+    config = AuenConfig.load()
+    try:
+        backend = detect_backend(config.backend)
+        backend_error = None
+    except (OSError, RuntimeError, ValueError) as exc:
+        backend = None
+        backend_error = str(exc)
+    AuenApp(config, backend=backend, backend_error=backend_error).run()
+
+
+def _parse_timestamp(value: str) -> float:
+    """Parse seconds, mm:ss, or hh:mm:ss into non-negative seconds."""
+    parts = value.strip().split(":")
+    if not value.strip() or len(parts) > 3:
+        raise ValueError("Enter seconds, mm:ss, or hh:mm:ss")
+    try:
+        numbers = [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError("Time must contain only numbers and colons") from exc
+    if any(not math.isfinite(number) for number in numbers):
+        raise ValueError("Time must be a finite number")
+    if any(number < 0 for number in numbers):
+        raise ValueError("Time cannot be negative")
+    if len(numbers) > 1 and any(number >= 60 for number in numbers[1:]):
+        raise ValueError("Minutes and seconds must be below 60")
+    seconds = 0.0
+    for number in numbers:
+        seconds = seconds * 60 + number
+    return seconds
+
+
+def _format_timestamp(seconds: float | None) -> str:
+    total = max(0, int(seconds or 0))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"

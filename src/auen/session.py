@@ -8,13 +8,16 @@ from typing import TYPE_CHECKING
 from auen.cache import CacheEntry, CacheManager
 from auen.downloads import DownloadManager
 from auen.media.youtube import YouTubeService, is_youtube_url
-from auen.models import RepeatMode, SessionMode, Track
+from auen.models import RepeatMode, SessionMode, Track, TrackSource
+from auen.player import PlaybackController
 from auen.playlist import Playlist
 from auen.state import SessionSnapshot, StateStore
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from concurrent.futures import Future
 
+    from auen.backends.base import AudioBackend
     from auen.config import AuenConfig
 
 
@@ -45,6 +48,11 @@ class AuenSession:
         self.playlist = Playlist()
         self.current_track: Track | None = None
         self.elapsed_seconds = 0.0
+        self.player: PlaybackController | None = None
+        self.session_mode = SessionMode(config.session_mode)
+        self.on_track_changed: Callable[[Track | None], None] | None = None
+        self.on_playback_error: Callable[[Track, Exception], None] | None = None
+        self._temporary_uris: set[str] = set()
 
         self.playlist.shuffle = config.shuffle
         self.playlist.repeat_mode = RepeatMode(config.repeat_mode)
@@ -78,6 +86,37 @@ class AuenSession:
             return self.downloads.submit(track)
         return None
 
+    def set_session_mode(self, mode: SessionMode) -> None:
+        """Set remote-media behavior for the rest of this running session."""
+        if mode is SessionMode.ASK:
+            raise ValueError("a concrete session mode is required")
+        self.session_mode = mode
+
+    def start_playback(
+        self,
+        backend: AudioBackend,
+        *,
+        session_mode: SessionMode | None = None,
+    ) -> PlaybackController:
+        """Start the single playback worker after startup choices are known."""
+        if session_mode is not None:
+            self.set_session_mode(session_mode)
+        if self.session_mode is SessionMode.ASK:
+            raise RuntimeError("choose a session mode before starting playback")
+        if self.player is not None:
+            return self.player
+
+        self.player = PlaybackController(
+            self.playlist,
+            backend,
+            prepare=self._prepare_track,
+            on_track_changed=self._track_changed,
+            on_error=self._playback_error,
+        )
+        self.player.set_volume(self.config.volume)
+        self.player.start()
+        return self.player
+
     def save_offline(self, track: Track) -> Future[CacheEntry]:
         return self.downloads.submit(track, pinned=True)
 
@@ -101,13 +140,53 @@ class AuenSession:
 
     def _restore(self) -> None:
         snapshot = self.state.load()
-        self.playlist.restore(snapshot.queue, snapshot.history)
+        queue = snapshot.queue
+        if snapshot.current_track is not None:
+            queue = [snapshot.current_track, *queue]
+        self.playlist.restore(queue, snapshot.history)
         self.playlist.shuffle = snapshot.shuffle
         self.playlist.repeat_mode = snapshot.repeat_mode
-        self.current_track = snapshot.current_track
-        self.elapsed_seconds = snapshot.elapsed_seconds
+        self.current_track = None
+        self.elapsed_seconds = 0.0
+
+    def _prepare_track(self, track: Track) -> str:
+        cached = self.cache.get(track.uri)
+        if cached is not None:
+            track.cached_path = cached.path
+            return str(cached.path)
+        if track.source is TrackSource.LOCAL:
+            return track.playable_uri
+        if self.player is None:
+            raise RuntimeError("playback is not initialized")
+        if self.player.backend.supports_streaming:
+            return self.youtube.resolve(track).playable_uri
+
+        entry = self.downloads.submit(track, pinned=False).result()
+        track.cached_path = entry.path
+        if self.session_mode is SessionMode.STREAM_ONLY:
+            self._temporary_uris.add(track.uri)
+        return str(entry.path)
+
+    def _track_changed(self, track: Track | None) -> None:
+        previous = self.current_track
+        self.current_track = track
+        self.elapsed_seconds = 0.0
+        if previous is not None and previous.uri in self._temporary_uris:
+            self.cache.remove(previous.uri)
+            previous.cached_path = None
+            self._temporary_uris.discard(previous.uri)
+        self.save()
+        if self.on_track_changed is not None:
+            self.on_track_changed(track)
+
+    def _playback_error(self, track: Track, error: Exception) -> None:
+        self.save()
+        if self.on_playback_error is not None:
+            self.on_playback_error(track, error)
 
     def close(self) -> None:
+        if self.player is not None:
+            self.player.close()
         self.save()
         self._search_executor.shutdown(wait=True, cancel_futures=True)
         self.downloads.close(wait=True, cancel_pending=True)
