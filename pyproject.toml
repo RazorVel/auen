@@ -9,8 +9,18 @@ description = "A terminal audio player with YouTube search, streaming, and cachi
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+keywords = ["audio", "terminal", "textual", "tui", "youtube"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Multimedia :: Sound/Audio :: Players",
+]
 dependencies = [
-    "textual>=0.80.0",
+    "textual>=8.2,<9",
     "yt-dlp>=2024.0.0",
     "platformdirs>=4.0.0",
     "tomli>=2.0.1; python_version < '3.11'",
@@ -29,6 +39,14 @@ dev = [
 
 [project.scripts]
 auen = "auen.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/razorvel/auen"
+Issues = "https://github.com/razorvel/auen/issues"
+Source = "https://github.com/razorvel/auen"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/audio-engine"]
 
 [tool.ruff]
 target-version = "py310"

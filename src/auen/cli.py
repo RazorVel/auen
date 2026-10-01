@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -204,11 +205,10 @@ def _doctor() -> int:
         print("[fail] No playback backend found (mpv or termux-media-player)")
         problems += 1
 
-    ytdlp = shutil.which("yt-dlp")
-    if ytdlp:
-        print(f"[ok] yt-dlp: {ytdlp}")
+    if importlib.util.find_spec("yt_dlp") is not None:
+        print("[ok] yt-dlp Python package")
     else:
-        print("[fail] yt-dlp executable was not found")
+        print("[fail] yt-dlp Python package was not found")
         problems += 1
 
     return 1 if problems else 0

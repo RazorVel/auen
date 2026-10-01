@@ -1,48 +1,120 @@
 # auen
 
-`auen` is a keyboard-first terminal audio player for Linux and Termux. It is being built
-around a Textual interface, selectable YouTube search results, local music, a persistent
-queue, and a managed offline library.
+`auen` is a keyboard-first terminal audio player for Linux and Android/Termux. It uses a
+full-screen Textual interface for YouTube search, queue management, streaming, and a
+size-limited persistent playback cache.
 
-> **Development status:** the models, playlist, Linux/Termux backend abstraction,
-> crash-safe session store, configuration CLI, startup-mode prompt, and Settings screen
-> exist. Search, cache management, and end-to-end playback orchestration are still under
-> construction.
+> **Prototype status — v0.1.0:** Linux playback has been manually exercised with `mpv`.
+> The Termux backend and responsive phone layout are implemented and automatically
+> tested, but playback has not yet been validated on a physical Android/Termux device.
+
+![auen in a wide terminal](docs/assets/auen-wide.svg)
+
+### Phone-width layout
+
+![auen in a narrow terminal](docs/assets/auen-narrow.svg)
+
+## What works in v0.1.0
+
+- Search YouTube and select tracks, albums, or playlists.
+- Load more results explicitly without fetching merely by moving the cursor.
+- Stream immediately or stream while retaining a managed offline copy.
+- Play, pause, jump to a timestamp, seek by 10 seconds, and skip tracks with `mpv`.
+- Add duplicate tracks with confirmation; play any queued row now or move its priority.
+- Persist the queue, played history, cached media, settings, and playback position across
+  restarts and crashes.
+- Preview and save themes, with an adaptive side-by-side or stacked phone-width layout.
+- Configure behavior through the TUI or scriptable `auen config` commands.
+
+This is intentionally an early prototype. A visible History view, named playlists,
+offline-library management, `:` command mode, and local directory import are planned for
+later versions. Some YouTube videos may require account cookies and cannot yet be played.
 
 ## Requirements
 
 - Python 3.10 or newer
-- Linux with `mpv`, or Android/Termux with Termux:API
-- `pipx` for the simplest isolated installation
+- Linux with `mpv`, or Android with Termux and Termux:API
+- Network access for YouTube search and streaming
 
-The interface is designed to remain portable across Unix terminals. Playback support is
-currently limited to Linux and Termux, with room for additional backends later.
+`pipx` is recommended on Linux because it keeps auen and its Python dependencies in an
+isolated environment.
 
-## Install
+## Install on Linux
 
-From a release or checked-out source directory:
+Install the system playback backend first. For Debian and Ubuntu:
 
 ```console
-pipx install .
+sudo apt install mpv pipx
+pipx ensurepath
+```
+
+Install the tagged prototype directly from GitHub:
+
+```console
+pipx install 'git+https://github.com/razorvel/auen.git@v0.1.0'
 auen doctor
 auen
 ```
 
-Without `pipx`:
+Alternatively, download the release wheel and install it with:
+
+```console
+pipx install ./auen-0.1.0-py3-none-any.whl
+```
+
+For a checked-out source tree, use `pipx install .`. A regular virtual environment also
+works:
 
 ```console
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install .
 auen doctor
+auen
 ```
 
-`auen doctor` checks the configuration, audio backend, and `yt-dlp` installation and
-reports actionable setup problems without launching the interface.
+## Prepare Termux for testing
+
+Install both [Termux](https://github.com/termux/termux-app#installation) and the
+[Termux:API companion app](https://github.com/termux/termux-api) from the same source so
+their signatures are compatible. Then, inside Termux:
+
+```console
+pkg update
+pkg install python git termux-api
+python -m pip install 'git+https://github.com/razorvel/auen.git@v0.1.0'
+auen doctor
+auen
+```
+
+Do not treat v0.1.0 as Termux-validated yet. The real-device test sequence and expected
+limitations are recorded in [`docs/termux-testing.md`](docs/termux-testing.md).
+
+## Essential controls
+
+| Key | Action |
+| --- | --- |
+| `/` | Focus search |
+| `Tab` / `Shift+Tab` | Switch between Results and Queue |
+| `Enter` | Open a collection, queue a result, or play a queued row now |
+| `Esc` | Leave search or return from a collection |
+| `Space` | Play or pause |
+| `[` / `]` | Seek backward or forward 10 seconds |
+| `g` | Jump to a timestamp |
+| `n` | Play next track |
+| `d` | Retain the selected result for offline playback |
+| `Home` | Promote the selected queued track to play next |
+| `Shift+Up` / `Shift+Down` | Change queue priority |
+| `Delete` | Remove the selected queued track |
+| `F2` | Open Settings |
+| `F3` | Preview and select a theme |
+| `q` | Quit and stop playback |
+
+Left and Right page through a long selected title. Leaving that row restores its title to
+the beginning. Playback seeking deliberately uses `[` and `]`, so arrow keys remain safe
+for tables and text fields.
 
 ## Settings from the terminal
-
-Press `F2` inside auen to open the Settings screen. The same settings are scriptable:
 
 ```console
 auen config list
@@ -52,8 +124,9 @@ auen config set session.mode stream_and_cache
 auen config reset playback.volume
 ```
 
-Settings are stored in the platform's XDG configuration directory. Queue and recovery
-state are kept separately in a transactional SQLite database.
+Preferences are stored in the platform configuration directory. Queue and recovery data
+use a separate transactional SQLite database. Run `auen doctor` whenever installation or
+backend setup is unclear.
 
 ## Develop and build
 
@@ -65,8 +138,10 @@ make check
 make build
 ```
 
-`make check` runs tests with a safety timeout, linting, and strict type checking. Build
-artifacts are written to `dist/` as a wheel and source archive.
+`make check` runs the test suite with a safety timeout, linting, and strict type checking.
+`make build` creates a wheel and source archive in `dist/`. The product baseline and
+future requirements are in [`docs/requirements.md`](docs/requirements.md).
 
-The agreed product behavior and implementation boundaries are recorded in
-[`docs/requirements.md`](docs/requirements.md).
+## License
+
+auen is available under the [MIT License](LICENSE).

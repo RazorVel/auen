@@ -82,3 +82,18 @@ def test_doctor_reports_incomplete_termux_api_package(tmp_path: Path, capsys: ob
     output = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "termux-volume was not found" in output
     assert "API unavailable" in output
+
+
+def test_doctor_checks_the_bundled_ytdlp_module_not_a_global_command(
+    tmp_path: Path, capsys: object
+) -> None:
+    commands = {"mpv": "/usr/bin/mpv"}
+    with (
+        patch("auen.config.user_config_dir", return_value=str(tmp_path)),
+        patch("auen.cli.shutil.which", side_effect=lambda name: commands.get(name)),
+        patch("auen.cli.importlib.util.find_spec", return_value=None),
+    ):
+        assert main(["doctor"]) == 1
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "yt-dlp Python package was not found" in output
