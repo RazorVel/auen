@@ -68,7 +68,7 @@ Settings screen and through scriptable `auen config` commands. Initial settings 
 - Per-session streaming/cache behavior
 - Cache location and size limit
 - Download concurrency
-- Search result count
+- Load-more batch size (initial results adapt to the visible pane)
 - Recursive directory scanning
 - Default volume, shuffle, and repeat behavior
 - Session restoration

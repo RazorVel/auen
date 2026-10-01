@@ -492,7 +492,7 @@ class SettingsScreen(Screen[bool]):
                 )
             yield from self._input_row("Volume (0-100)", "volume", str(self.config.volume))
             yield from self._input_row(
-                "Search results", "search-results", str(self.config.search_result_count)
+                "Load more amount", "search-results", str(self.config.search_result_count)
             )
             yield from self._input_row(
                 "Cache limit (MiB)",
@@ -555,7 +555,9 @@ class SettingsScreen(Screen[bool]):
         self.config.session_mode = str(self.query_one("#session-mode", Select).value)
         self.config.repeat_mode = str(self.query_one("#repeat-mode", Select).value)
         self.config.volume = self._integer_value("#volume", "volume")
-        self.config.search_result_count = self._integer_value("#search-results", "search results")
+        self.config.search_result_count = self._integer_value(
+            "#search-results", "load more amount"
+        )
         cache_mebibytes = self._integer_value("#cache-limit", "cache limit")
         self.config.cache_max_bytes = cache_mebibytes * 1024**2
         self.config.max_download_threads = self._integer_value(
@@ -824,6 +826,7 @@ class AuenApp(App[None]):
         previous_count: int = 0,
         cursor_row: int = 0,
         existing_items: Sequence[SearchItem] = (),
+        max_display_count: int | None = None,
     ) -> None:
         try:
             items = await asyncio.wrap_future(self.session.submit_search(query, limit=limit))
@@ -847,7 +850,11 @@ class AuenApp(App[None]):
             # running. Preserve the row selected at render time, rather than
             # the row that was selected when Load more was confirmed.
             cursor_row = self.query_one("#results", DataTable).cursor_row
-        displayed_items = _merge_search_items(existing_items, items)
+        displayed_items = _merge_search_items(
+            existing_items,
+            items,
+            max_items=max_display_count,
+        )
         grew = len(displayed_items) > previous_count
         self._search_has_more = grew and len(items) >= limit and limit < 100
         self._show_results(
@@ -964,6 +971,7 @@ class AuenApp(App[None]):
             previous_count=previous_count,
             cursor_row=cursor_row,
             existing_items=tuple(self._result_order),
+            max_display_count=previous_count + self.config.search_result_count,
         )
 
     def _capture_results_state(self) -> ResultsViewState:
@@ -1480,7 +1488,10 @@ def _result_row_key(item: SearchItem, position: int) -> str:
 
 
 def _merge_search_items(
-    existing: Sequence[SearchItem], incoming: Sequence[SearchItem]
+    existing: Sequence[SearchItem],
+    incoming: Sequence[SearchItem],
+    *,
+    max_items: int | None = None,
 ) -> list[SearchItem]:
     """Preserve displayed order and append only newly discovered media."""
     merged: list[SearchItem] = []
@@ -1491,6 +1502,8 @@ def _merge_search_items(
             continue
         seen.add(identity)
         merged.append(item)
+        if max_items is not None and len(merged) >= max_items:
+            break
     return merged
 
 

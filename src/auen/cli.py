@@ -24,6 +24,7 @@ SETTING_ALIASES = {
     "playback.repeat": "repeat_mode",
     "playback.shuffle": "shuffle",
     "playback.volume": "volume",
+    "search.load_more": "search_result_count",
     "search.results": "search_result_count",
     "session.mode": "session_mode",
     "session.restore": "restore_session",

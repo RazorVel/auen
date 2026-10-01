@@ -169,7 +169,7 @@ class AuenConfig:
         if self.max_download_threads < 1:
             raise ValueError("max_download_threads must be at least 1")
         if self.search_result_count < 1:
-            raise ValueError("search_result_count must be at least 1")
+            raise ValueError("load more amount must be at least 1")
         if self.cache_max_bytes < 0:
             raise ValueError("cache_max_bytes cannot be negative")
         if not self.theme.strip():

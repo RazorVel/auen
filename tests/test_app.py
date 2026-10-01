@@ -65,6 +65,10 @@ async def test_settings_screen_saves_to_shared_config(tmp_path: Path) -> None:
         await pilot.press("f2")
         await pilot.pause()
         assert isinstance(app.screen, SettingsScreen)
+        assert any(
+            "Load more amount" in str(label.render())
+            for label in app.screen.query(".setting-row Label")
+        )
 
         volume = app.screen.query_one("#volume")
         volume.value = "61"
@@ -220,6 +224,43 @@ def test_load_more_merge_preserves_order_and_deduplicates_uris() -> None:
     )
 
     assert _merge_search_items([first], [repeated, second]) == [first, second]
+
+
+def test_load_more_merge_caps_newly_displayed_rows() -> None:
+    existing = [
+        Track(
+            title=f"Existing {index}",
+            source=TrackSource.YOUTUBE,
+            uri=f"https://youtube.com/watch?v=existing-{index}",
+        )
+        for index in range(3)
+    ]
+    displaced_collection = MediaCollection(
+        title="Album",
+        uri="https://youtube.com/playlist?list=album",
+        collection_id="album",
+    )
+    incoming = [
+        *existing,
+        *[
+            Track(
+                title=f"New {index}",
+                source=TrackSource.YOUTUBE,
+                uri=f"https://youtube.com/watch?v=new-{index}",
+            )
+            for index in range(7)
+        ],
+        displaced_collection,
+    ]
+
+    merged = _merge_search_items(
+        [*existing, displaced_collection],
+        incoming,
+        max_items=len(existing) + 1 + 5,
+    )
+
+    assert merged[:4] == [*existing, displaced_collection]
+    assert len(merged) == len(existing) + 1 + 5
 
 
 @pytest.mark.parametrize(
