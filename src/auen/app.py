@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from textual import on, work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
@@ -32,6 +33,15 @@ if TYPE_CHECKING:
     from textual.binding import BindingType
 
     from auen.backends.base import AudioBackend
+
+
+class SearchInput(Input):
+    """Search field with conventional select-all behavior."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("ctrl+a", "select_all", "Select all", show=False, priority=True),
+        *Input.BINDINGS,
+    ]
 
 
 class SessionModeScreen(ModalScreen[SessionMode]):
@@ -362,8 +372,8 @@ class AuenApp(App[None]):
         ("/", "focus_search", "⌕ Search"),
         ("space", "toggle_playback", "▶/Ⅱ Play"),
         ("n", "next_track", "» Next"),
-        ("left", "seek_backward", "← 10s"),
-        ("right", "seek_forward", "10s →"),
+        ("[", "seek_backward", "← 10s"),
+        ("]", "seek_forward", "10s →"),
         ("g", "go_to_time", "↪ Time"),
         ("d", "download_selected", "↓ Offline"),
         ("delete", "remove_queued", "Del Remove"),
@@ -422,8 +432,21 @@ class AuenApp(App[None]):
     }
     #playback-controls {
         height: 1;
+        align-horizontal: center;
+    }
+    .playback-control {
+        width: 1fr;
+        min-width: 7;
+        height: 1;
+        border: none;
+        padding: 0 1;
         color: $text-muted;
-        text-align: center;
+        background: transparent;
+    }
+    .playback-control:focus, .playback-control:hover {
+        color: $text;
+        background: $boost;
+        text-style: bold;
     }
     """
 
@@ -449,7 +472,7 @@ class AuenApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Input(placeholder="Search YouTube or paste a YouTube URL…", id="search-bar")
+        yield SearchInput(placeholder="Search YouTube or paste a YouTube URL…", id="search-bar")
         with Horizontal(id="workspace"):
             with Vertical(classes="pane", id="results-pane"):
                 yield Label("⌕ Results · 0", classes="pane-title", id="results-title")
@@ -467,10 +490,18 @@ class AuenApp(App[None]):
                     id="playback-progress",
                 )
                 yield Static("0:00 / --:--", id="playback-time")
-            yield Static(
-                "← -10s    ␣ play/pause    +10s →    g jump    n next",
-                id="playback-controls",
-            )
+            with Horizontal(id="playback-controls"):
+                yield Button("← 10s  [", id="seek-back", classes="playback-control", compact=True)
+                yield Button(
+                    "␣ Play/Pause", id="play-pause", classes="playback-control", compact=True
+                )
+                yield Button(
+                    "10s →  ]", id="seek-forward", classes="playback-control", compact=True
+                )
+                yield Button("↪ Jump  g", id="jump-time", classes="playback-control", compact=True)
+                yield Button(
+                    "» Next  n", id="next-track", classes="playback-control", compact=True
+                )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -676,15 +707,31 @@ class AuenApp(App[None]):
         if self.session.player is not None:
             self.session.player.toggle_pause()
 
+    @on(Button.Pressed, "#play-pause")
+    def playback_button_pressed(self) -> None:
+        self.action_toggle_playback()
+
     def action_next_track(self) -> None:
         if self.session.player is not None:
             self.session.player.skip()
 
+    @on(Button.Pressed, "#next-track")
+    def next_button_pressed(self) -> None:
+        self.action_next_track()
+
     def action_seek_backward(self) -> None:
         self._seek(-10.0)
 
+    @on(Button.Pressed, "#seek-back")
+    def seek_back_button_pressed(self) -> None:
+        self.action_seek_backward()
+
     def action_seek_forward(self) -> None:
         self._seek(10.0)
+
+    @on(Button.Pressed, "#seek-forward")
+    def seek_forward_button_pressed(self) -> None:
+        self.action_seek_forward()
 
     def action_go_to_time(self) -> None:
         player = self.session.player
@@ -700,6 +747,10 @@ class AuenApp(App[None]):
             )
             return
         self.push_screen(SeekScreen(track.duration_seconds), self._seek_to)
+
+    @on(Button.Pressed, "#jump-time")
+    def jump_button_pressed(self) -> None:
+        self.action_go_to_time()
 
     def _seek_to(self, seconds: float | None) -> None:
         if seconds is None or self.session.player is None:

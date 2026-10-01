@@ -8,6 +8,7 @@ from textual.widgets import DataTable, Input, Label
 from auen.app import (
     AuenApp,
     DuplicateQueueScreen,
+    SearchInput,
     SessionModeScreen,
     SettingsScreen,
     _format_timestamp,
@@ -168,3 +169,15 @@ def test_parse_timestamp_rejects_invalid_values(value: str) -> None:
 def test_format_timestamp() -> None:
     assert _format_timestamp(90) == "1:30"
     assert _format_timestamp(3735) == "1:02:15"
+
+
+async def test_ctrl_a_selects_all_search_text(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test() as pilot:
+        search = app.query_one("#search-bar", SearchInput)
+        search.value = "replace this"
+        search.focus()
+        await pilot.press("ctrl+a", "x")
+
+        assert search.value == "x"
