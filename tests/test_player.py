@@ -163,6 +163,7 @@ def test_preparation_error_is_reported_without_killing_worker() -> None:
     playlist = Playlist()
     backend = FakeBackend()
     errors: list[tuple[Track, Exception]] = []
+    started: list[Track] = []
     failed = make_track("failed")
     good = make_track("good")
     playlist.add_many([failed, good])
@@ -176,6 +177,7 @@ def test_preparation_error_is_reported_without_killing_worker() -> None:
         playlist,
         backend,
         prepare=prepare,
+        on_track_started=started.append,
         on_error=lambda track, error: errors.append((track, error)),
     )
     player.start()
@@ -184,6 +186,7 @@ def test_preparation_error_is_reported_without_killing_worker() -> None:
     assert errors[0][0] is failed
     assert str(errors[0][1]) == "unavailable"
     assert playlist.history_list == [failed]
+    assert started == [good]
     player.close()
 
 

@@ -6,12 +6,13 @@ import json
 import sqlite3
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from platformdirs import user_state_dir
 
-from auen.models import RepeatMode, Track, TrackSource
+from auen.models import HistoryEntry, RepeatMode, Track, TrackSource
 
 
 @dataclass(slots=True)
@@ -62,9 +63,98 @@ class StateStore:
                     track TEXT NOT NULL
                 );
 
-                PRAGMA user_version = 1;
+                CREATE TABLE IF NOT EXISTS recent_plays (
+                    uri TEXT PRIMARY KEY,
+                    track TEXT NOT NULL,
+                    last_played_at TEXT NOT NULL,
+                    play_count INTEGER NOT NULL DEFAULT 1
+                );
+
+                PRAGMA user_version = 2;
                 """
             )
+
+    def record_play(
+        self,
+        track: Track,
+        *,
+        limit: int = 500,
+        played_at: datetime | None = None,
+    ) -> None:
+        """Upsert a track in recent history and prune the oldest unique entries."""
+        if limit < 1:
+            raise ValueError("history limit must be at least 1")
+        timestamp = played_at or datetime.now(timezone.utc)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        encoded_timestamp = timestamp.astimezone(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO recent_plays(uri, track, last_played_at, play_count)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(uri) DO UPDATE SET
+                    track = excluded.track,
+                    last_played_at = excluded.last_played_at,
+                    play_count = recent_plays.play_count + 1
+                """,
+                (track.uri, _encode_track(track), encoded_timestamp),
+            )
+            self._prune_recent_history(limit)
+
+    def load_recent_history(self, *, limit: int = 500) -> list[HistoryEntry]:
+        """Return unique tracks ordered from most to least recently played."""
+        if limit < 1:
+            return []
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT track, last_played_at, play_count
+                FROM recent_plays
+                ORDER BY last_played_at DESC, uri
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            HistoryEntry(
+                track=_decode_track(row["track"]),
+                last_played_at=datetime.fromisoformat(row["last_played_at"]),
+                play_count=int(row["play_count"]),
+            )
+            for row in rows
+        ]
+
+    def remove_recent_history(self, uri: str) -> bool:
+        """Remove one track from recent history."""
+        with self._lock, self._connection:
+            cursor = self._connection.execute("DELETE FROM recent_plays WHERE uri = ?", (uri,))
+        return cursor.rowcount > 0
+
+    def clear_recent_history(self) -> None:
+        """Remove all user-facing playback history without changing the queue."""
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM recent_plays")
+
+    def prune_recent_history(self, limit: int) -> None:
+        """Apply a new history size limit immediately."""
+        if limit < 1:
+            raise ValueError("history limit must be at least 1")
+        with self._lock, self._connection:
+            self._prune_recent_history(limit)
+
+    def _prune_recent_history(self, limit: int) -> None:
+        self._connection.execute(
+            """
+            DELETE FROM recent_plays
+            WHERE uri NOT IN (
+                SELECT uri FROM recent_plays
+                ORDER BY last_played_at DESC, uri
+                LIMIT ?
+            )
+            """,
+            (limit,),
+        )
 
     def save(self, snapshot: SessionSnapshot) -> None:
         """Replace the saved session in one durable transaction."""

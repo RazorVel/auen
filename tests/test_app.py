@@ -1,6 +1,7 @@
 """Tests for the Textual application shell and settings screen."""
 
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Select
 
 from auen.app import (
     AuenApp,
+    ClearHistoryScreen,
     DuplicateQueueScreen,
     LoadMoreScreen,
     SearchInput,
@@ -888,3 +890,145 @@ async def test_queue_supports_play_next_reorder_and_play_now(tmp_path: Path) -> 
         assert app.session.playlist.queue_list[0] is tracks[1]
         assert queue.get_cell(f"{tracks[1].track_id}:0", "time") == "-"
         assert queue.get_cell(f"{tracks[1].track_id}:0", "status") == "↗"
+
+
+async def test_history_view_restores_previous_results_and_cursor(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    results = [
+        Track(title=f"Result {index}", source=TrackSource.LOCAL, uri=f"/result-{index}.opus")
+        for index in range(3)
+    ]
+    played = Track(
+        title="Previously played",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=played",
+        duration_display="3:14",
+    )
+    app.session.state.record_play(
+        played,
+        played_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+
+    async with app.run_test() as pilot:
+        app._show_results(results, cursor_row=2)
+        await pilot.press("h")
+
+        table = app.query_one("#results", DataTable)
+        assert "History · 1" in str(app.query_one("#results-title", Label).render())
+        assert table.get_cell(f"{played.track_id}:0", "time") == "3:14"
+        assert table.get_cell(f"{played.track_id}:0", "plays") == "1"
+
+        await pilot.press("escape")
+        assert "Results · 3" in str(app.query_one("#results-title", Label).render())
+        assert table.cursor_row == 2
+        assert app._result_order == results
+
+
+async def test_history_supports_play_next_play_now_and_duplicate_confirmation(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    played = Track(
+        title="History track",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=history",
+    )
+    app.session.state.record_play(played)
+
+    async with app.run_test() as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("h")
+        await pilot.pause()
+        assert app.query_one("#results", DataTable).has_focus
+        await pilot.press("home")
+        assert app.session.playlist.queue_list == [played]
+
+        await pilot.press("enter")
+        assert isinstance(app.screen, DuplicateQueueScreen)
+        await pilot.click("#confirm-duplicate")
+        assert [track.uri for track in app.session.playlist.queue_list] == [played.uri, played.uri]
+
+
+async def test_history_can_append_track_to_end_of_queue(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    queued = Track(title="Already queued", source=TrackSource.LOCAL, uri="/queued.opus")
+    played = Track(title="History track", source=TrackSource.LOCAL, uri="/history.opus")
+    app.session.enqueue(queued)
+    app.session.state.record_play(played)
+
+    async with app.run_test() as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("h")
+        await pilot.press("a")
+
+        assert app.session.playlist.queue_list == [queued, played]
+
+        await pilot.press("a")
+        assert isinstance(app.screen, DuplicateQueueScreen)
+        await pilot.click("#confirm-duplicate")
+        assert app.session.playlist.queue_list == [queued, played, played]
+
+
+async def test_history_shortcuts_type_normally_in_search(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test() as pilot:
+        search = app.query_one("#search-bar", Input)
+        search.focus()
+        await pilot.press("a", "h", "c")
+
+        assert search.value == "ahc"
+        assert not app._showing_history
+
+
+async def test_history_supports_remove_and_confirmed_clear(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    first = Track(title="First", source=TrackSource.LOCAL, uri="/first.opus")
+    second = Track(title="Second", source=TrackSource.LOCAL, uri="/second.opus")
+    app.session.state.record_play(first)
+    app.session.state.record_play(second)
+
+    async with app.run_test() as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("h")
+        await pilot.pause()
+        assert app.query_one("#results", DataTable).has_focus
+        await pilot.press("delete")
+        assert len(app.session.recent_history()) == 1
+
+        await pilot.press("c")
+        assert isinstance(app.screen, ClearHistoryScreen)
+        await pilot.press("escape")
+        assert len(app.session.recent_history()) == 1
+
+        await pilot.press("c")
+        await pilot.click("#confirm-clear-history")
+        assert app.session.recent_history() == []
+        assert app.query_one("#results", DataTable).row_count == 1
+
+
+async def test_history_columns_remain_contained_when_resized(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(
+        title="A deliberately long previously played title with emoji 🔥",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=history-resize",
+        duration_display="1:29:39",
+    )
+    app.session.state.record_play(track)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("h")
+
+        table = app.query_one("#results", DataTable)
+        for width, height in ((60, 30), (120, 35), (55, 25), (100, 30)):
+            await pilot.resize_terminal(width, height)
+            await pilot.pause()
+
+            assert table.ordered_columns[0].width == app._table_title_width(table)
+            assert sum(column.get_render_width(table) for column in table.ordered_columns) <= (
+                table.size.width - 1
+            )
+            assert table.get_cell(f"{track.track_id}:0", "time") == "1:29:39"
+            assert table.get_cell(f"{track.track_id}:0", "plays") == "1"

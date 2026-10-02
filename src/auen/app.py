@@ -8,6 +8,7 @@ import math
 import os
 import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, ClassVar
 
 from rich.cells import cell_len, chop_cells
@@ -36,6 +37,7 @@ from auen.backends import detect_backend
 from auen.config import AuenConfig
 from auen.models import (
     CollectionKind,
+    HistoryEntry,
     MediaCollection,
     PlaybackState,
     RepeatMode,
@@ -122,7 +124,7 @@ class TrackTable(DataTable[object]):
             self.action_cursor_down()
 
     def action_scroll_home(self) -> None:
-        if self.id == "queue":
+        if self.id == "queue" or self.has_class("history-view"):
             self.post_message(self.QueuePlayNextRequested(self))
         else:
             super().action_scroll_home()
@@ -139,6 +141,7 @@ class ResultsViewState:
     query: str | None
     limit: int
     has_more: bool
+    history_entries: list[HistoryEntry] | None
 
 
 class SessionModeScreen(ModalScreen[SessionMode]):
@@ -296,6 +299,60 @@ class LoadMoreScreen(ModalScreen[bool]):
         self.dismiss(False)
 
     @on(Button.Pressed, "#confirm-load-more")
+    def confirm_pressed(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class ClearHistoryScreen(ModalScreen[bool]):
+    """Confirm removal of the entire recently played history."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    ClearHistoryScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #clear-history-dialog {
+        width: 56;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+    #clear-history-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #clear-history-actions Button {
+        margin-left: 1;
+    }
+    ClearHistoryScreen.termux-safe #clear-history-dialog {
+        border: ascii $warning;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="clear-history-dialog"):
+            yield Label("Clear recently played?", classes="dialog-title")
+            yield Static("This removes play counts and timestamps, but keeps queued tracks.")
+            with Horizontal(id="clear-history-actions"):
+                yield Button("Cancel", id="cancel-clear-history")
+                yield Button("Clear history", id="confirm-clear-history", variant="warning")
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
+        self.query_one("#cancel-clear-history", Button).focus()
+
+    @on(Button.Pressed, "#cancel-clear-history")
+    def cancel_pressed(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-clear-history")
     def confirm_pressed(self) -> None:
         self.dismiss(True)
 
@@ -527,6 +584,9 @@ class SettingsScreen(Screen[bool]):
                 "Load more amount", "search-results", str(self.config.search_result_count)
             )
             yield from self._input_row(
+                "Recently played limit", "history-limit", str(self.config.history_limit)
+            )
+            yield from self._input_row(
                 "Cache limit (MiB)",
                 "cache-limit",
                 str(self.config.cache_max_bytes // 1024**2),
@@ -589,6 +649,9 @@ class SettingsScreen(Screen[bool]):
         self.config.search_result_count = self._integer_value(
             "#search-results", "load more amount"
         )
+        self.config.history_limit = self._integer_value(
+            "#history-limit", "recently played limit"
+        )
         cache_mebibytes = self._integer_value("#cache-limit", "cache limit")
         self.config.cache_max_bytes = cache_mebibytes * 1024**2
         self.config.max_download_threads = self._integer_value(
@@ -620,6 +683,9 @@ class AuenApp(App[None]):
         Binding("[", "seek_backward", "← 10s", show=False),
         Binding("]", "seek_forward", "10s →", show=False),
         Binding("g", "go_to_time", "↪ Time", show=False),
+        Binding("h", "show_history", "◷ History"),
+        Binding("a", "enqueue_history", "Add history track", show=False),
+        Binding("c", "clear_history", "Clear history", show=False),
         Binding("d", "download_selected", "↓ Offline"),
         Binding("delete", "remove_queued", "Del Remove"),
         Binding("f2", "settings", "⚙ Settings"),
@@ -733,11 +799,15 @@ class AuenApp(App[None]):
         self.backend = backend
         self.backend_error = backend_error
         self.session.on_track_changed = self._playback_track_changed
+        self.session.on_history_changed = self._playback_history_changed
         self.session.on_playback_error = self._playback_failed
         self.current_session_mode = SessionMode(self.config.session_mode)
         self.search_results: dict[str, SearchItem] = {}
         self._result_order: list[SearchItem] = []
         self._results_heading = "Results"
+        self._showing_history = False
+        self._history_entries: list[HistoryEntry] = []
+        self._history_return: ResultsViewState | None = None
         self._results_parent: ResultsViewState | None = None
         self._search_restore: ResultsViewState | None = None
         self._active_query: str | None = None
@@ -790,8 +860,7 @@ class AuenApp(App[None]):
         self._apply_responsive_layout(self.size.width)
         results = self.query_one("#results", DataTable)
         results.cell_padding = 0
-        results.add_column("Title", width=10, key="title")
-        results.add_column("Time", width=7, key="time")
+        self._configure_results_columns(history=False)
         results.zebra_stripes = True
         queue = self.query_one("#queue", DataTable)
         queue.cell_padding = 0
@@ -848,6 +917,7 @@ class AuenApp(App[None]):
         if not query:
             return
         self._search_restore = self._capture_results_state()
+        self._history_return = None
         self._results_parent = None
         self._active_query = query
         self._search_limit = self._initial_search_limit()
@@ -874,6 +944,11 @@ class AuenApp(App[None]):
 
     @on(TrackTable.QueuePlayNextRequested)
     def queue_play_next_requested(self, event: TrackTable.QueuePlayNextRequested) -> None:
+        if event.table.id == "results" and self._showing_history:
+            entry = self._selected_history_entry()
+            if entry is not None:
+                self._request_history_queue(entry.track, play_now=False, append=False)
+            return
         track = self.session.prioritize_queued(event.table.cursor_row)
         if track is None:
             return
@@ -883,6 +958,9 @@ class AuenApp(App[None]):
 
     @on(TrackTable.ResultsBackRequested)
     def results_back_requested(self) -> None:
+        if self._showing_history:
+            self._leave_history()
+            return
         if self._results_parent is None:
             return
         self._search_generation += 1
@@ -957,7 +1035,10 @@ class AuenApp(App[None]):
         cursor_row: int = 0,
     ) -> None:
         table = self.query_one("#results", DataTable)
+        self._configure_results_columns(history=False)
         table.clear()
+        self._showing_history = False
+        self._history_entries = []
         self._title_pages = {
             key: page for key, page in self._title_pages.items() if key[0] != "results"
         }
@@ -976,6 +1057,7 @@ class AuenApp(App[None]):
         if has_more:
             table.add_row("Load more…", "Enter", key=_LOAD_MORE_KEY)
         self.query_one("#results-title", Label).update(f"⌕ {heading} · {len(items)}")
+        self._sync_table_width(table)
         if not items:
             table.add_row("No matching videos found", "", key=_STATE_KEY)
             self.query_one("#queue", DataTable).focus()
@@ -983,8 +1065,68 @@ class AuenApp(App[None]):
             table.focus()
             table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
 
+    def _show_history(
+        self,
+        entries: Sequence[HistoryEntry] | None = None,
+        *,
+        cursor_row: int = 0,
+    ) -> None:
+        history = list(self.session.recent_history() if entries is None else entries)
+        table = self.query_one("#results", DataTable)
+        self._configure_results_columns(history=True)
+        table.clear()
+        self._title_pages = {
+            key: page for key, page in self._title_pages.items() if key[0] != "results"
+        }
+        self._showing_history = True
+        self._history_entries = history
+        self._result_order = [entry.track for entry in history]
+        self._results_heading = "History"
+        self.search_results = {
+            _result_row_key(entry.track, position): entry.track
+            for position, entry in enumerate(history)
+        }
+        self._active_query = None
+        self._search_limit = 0
+        self._search_has_more = False
+        title_width = self._table_title_width(table)
+        for position, entry in enumerate(history):
+            table.add_row(
+                _title_cell(entry.track.title, title_width, 0)[0],
+                entry.track.duration_display or "-",
+                _history_time(entry.last_played_at),
+                str(entry.play_count),
+                key=_result_row_key(entry.track, position),
+            )
+        self.query_one("#results-title", Label).update(f"◷ History · {len(history)}")
+        if not history:
+            table.add_row("No recently played tracks", "", "", "", key=_STATE_KEY)
+        table.add_class("history-view")
+        self._sync_table_width(table)
+        table.focus()
+        table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
+
+    def _configure_results_columns(self, *, history: bool) -> None:
+        table = self.query_one("#results", DataTable)
+        wanted = 4 if history else 2
+        if len(table.ordered_columns) == wanted:
+            table.set_class(history, "history-view")
+            return
+        table.clear(columns=True)
+        table.add_column("Title", width=10, key="title")
+        table.add_column("Time", width=7, key="time")
+        if history:
+            table.add_column("Last", width=10, key="last")
+            table.add_column("Plays", width=5, key="plays")
+        table.set_class(history, "history-view")
+
     @on(DataTable.RowSelected, "#results")
     def result_selected(self, event: DataTable.RowSelected) -> None:
+        if self._showing_history:
+            entry = self._selected_history_entry()
+            if entry is not None:
+                self._request_history_queue(entry.track, play_now=True, append=False)
+            return
         if str(event.row_key.value) == _LOAD_MORE_KEY:
             self.push_screen(
                 LoadMoreScreen(self.config.search_result_count),
@@ -1068,9 +1210,13 @@ class AuenApp(App[None]):
             query=self._active_query,
             limit=self._search_limit,
             has_more=self._search_has_more,
+            history_entries=list(self._history_entries) if self._showing_history else None,
         )
 
     def _restore_results_state(self, state: ResultsViewState) -> None:
+        if state.history_entries is not None:
+            self._show_history(state.history_entries, cursor_row=state.cursor_row)
+            return
         self._active_query = state.query
         self._search_limit = state.limit
         self._search_has_more = state.has_more
@@ -1087,12 +1233,16 @@ class AuenApp(App[None]):
 
     def _show_search_state(self, message: str) -> None:
         table = self.query_one("#results", DataTable)
+        self._configure_results_columns(history=False)
         table.clear()
+        self._showing_history = False
+        self._history_entries = []
         self._result_order = []
         self.search_results = {}
         self._results_heading = "Results"
         table.add_row(message, "", key=_STATE_KEY)
         self.query_one("#results-title", Label).update("⌕ Results")
+        self._sync_table_width(table)
 
     def _duplicate_queue_decided(self, track: Track, confirmed: bool | None) -> None:
         if confirmed:
@@ -1102,6 +1252,40 @@ class AuenApp(App[None]):
         future = self.session.enqueue(track, session_mode=self.current_session_mode)
         self._refresh_queue()
         self.notify(track.title, title="Added to queue")
+        if future is not None:
+            future.add_done_callback(self._download_finished)
+
+    def _request_history_queue(self, track: Track, *, play_now: bool, append: bool) -> None:
+        if any(queued.uri == track.uri for queued in self.session.playlist.queue_list):
+            self.push_screen(
+                DuplicateQueueScreen(track),
+                lambda confirmed: self._history_duplicate_decided(
+                    track, play_now, append, confirmed
+                ),
+            )
+            return
+        self._queue_history_track(track, play_now=play_now, append=append)
+
+    def _history_duplicate_decided(
+        self,
+        track: Track,
+        play_now: bool,
+        append: bool,
+        confirmed: bool | None,
+    ) -> None:
+        if confirmed:
+            self._queue_history_track(track, play_now=play_now, append=append)
+
+    def _queue_history_track(self, track: Track, *, play_now: bool, append: bool) -> None:
+        if append:
+            future = self.session.enqueue(track, session_mode=self.current_session_mode)
+        else:
+            future = self.session.enqueue_next(track, session_mode=self.current_session_mode)
+        if play_now and self.session.player is not None and self.session.current_track is not None:
+            self.session.player.skip()
+        self._refresh_queue()
+        title = "Added to queue" if append else "Playing now" if play_now else "Playing next"
+        self.notify(track.title, title=title)
         if future is not None:
             future.add_done_callback(self._download_finished)
 
@@ -1171,7 +1355,7 @@ class AuenApp(App[None]):
         # Leave one cell for Textual's vertical scrollbar in addition to the
         # fixed metadata columns. Otherwise the scrollbar obscures the final
         # duration digit when the pane has enough rows to scroll.
-        reserved = 9 if table.id == "results" else 13
+        reserved = (25 if self._showing_history else 9) if table.id == "results" else 13
         return max(6, table.size.width - reserved)
 
     def _reset_title_pages(self, table: DataTable[object]) -> None:
@@ -1292,6 +1476,15 @@ class AuenApp(App[None]):
         self.call_from_thread(self._show_now_playing, track)
         self.call_from_thread(self._refresh_queue)
 
+    def _playback_history_changed(self) -> None:
+        if self.is_running:
+            self.call_from_thread(self._refresh_history_if_visible)
+
+    def _refresh_history_if_visible(self) -> None:
+        if self._showing_history:
+            cursor_row = self.query_one("#results", DataTable).cursor_row
+            self._show_history(cursor_row=max(0, cursor_row))
+
     def _show_now_playing(self, track: Track | None) -> None:
         message = "○ Nothing playing" if track is None else f"▶ {track.title}"
         self.query_one("#now-playing", Static).update(message)
@@ -1348,6 +1541,52 @@ class AuenApp(App[None]):
     def action_focus_search(self) -> None:
         self.query_one("#search-bar", Input).focus()
 
+    def action_show_history(self) -> None:
+        if self._showing_history:
+            self._leave_history()
+            return
+        self._history_return = self._capture_results_state()
+        self._search_generation += 1
+        self._search_loading = False
+        self._show_history()
+        self.notify(
+            "Enter play now · Home play next · a add · Del remove · c clear · Esc back",
+            title="Recently played",
+        )
+
+    def action_enqueue_history(self) -> None:
+        if not self._showing_history or not self.query_one("#results", DataTable).has_focus:
+            return
+        entry = self._selected_history_entry()
+        if entry is not None:
+            self._request_history_queue(entry.track, play_now=False, append=True)
+
+    def _leave_history(self) -> None:
+        state = self._history_return
+        self._history_return = None
+        if state is None:
+            self._show_results([])
+            return
+        self._restore_results_state(state)
+
+    def action_clear_history(self) -> None:
+        if not self._showing_history or not self._history_entries:
+            return
+        self.push_screen(ClearHistoryScreen(), self._clear_history_decided)
+
+    def _clear_history_decided(self, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+        self.session.clear_recent_history()
+        self._show_history()
+        self.notify("Recently played history was cleared", title="History")
+
+    def _selected_history_entry(self) -> HistoryEntry | None:
+        row = self.query_one("#results", DataTable).cursor_row
+        if not 0 <= row < len(self._history_entries):
+            return None
+        return self._history_entries[row]
+
     def action_leave_search(self) -> None:
         if self._search_loading:
             self._search_generation += 1
@@ -1397,6 +1636,7 @@ class AuenApp(App[None]):
         self.session.playlist.repeat_mode = RepeatMode(self.config.repeat_mode)
         self.session.cache.max_cache_bytes = self.config.cache_max_bytes
         self.session.cache.prune()
+        self.session.prune_recent_history()
         if (
             self.session.player is not None
             and self.config.volume != self._settings_volume_before
@@ -1494,8 +1734,18 @@ class AuenApp(App[None]):
         self.notify(track.title, title="Saving offline")
 
     def action_remove_queued(self) -> None:
+        results = self.query_one("#results", DataTable)
+        if self._showing_history and results.has_focus:
+            entry = self._selected_history_entry()
+            if entry is None:
+                return
+            cursor_row = results.cursor_row
+            if self.session.remove_recent_history(entry.track.uri):
+                self._show_history(cursor_row=max(0, cursor_row))
+                self.notify(entry.track.title, title="Removed from history")
+            return
         table = self.query_one("#queue", DataTable)
-        if self.session.remove_queued(table.cursor_row) is not None:
+        if table.has_focus and self.session.remove_queued(table.cursor_row) is not None:
             self._refresh_queue()
 
 
@@ -1552,6 +1802,17 @@ def _format_timestamp(seconds: float | None) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def _history_time(value: datetime) -> str:
+    """Format a history timestamp compactly in the terminal's local timezone."""
+    local = value.astimezone()
+    now = datetime.now().astimezone()
+    if local.date() == now.date():
+        return local.strftime("%H:%M")
+    if local.year == now.year:
+        return local.strftime("%b %d")
+    return local.strftime("%Y-%m-%d")
 
 
 def _title_window(value: str, width: int, page: int) -> tuple[str, int]:

@@ -25,6 +25,12 @@ class Playlist:
             self._queue.append(track)
             self._available.set()
 
+    def add_next(self, track: Track) -> None:
+        """Place a track at the head of the queue."""
+        with self._lock:
+            self._queue.appendleft(track)
+            self._available.set()
+
     def add_many(self, tracks: Iterable[Track]) -> None:
         with self._lock:
             for track in tracks:

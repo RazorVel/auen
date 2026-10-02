@@ -29,6 +29,7 @@ class AuenConfig:
     repeat_mode: str = RepeatMode.OFF.value
     stream_first: bool = True
     search_result_count: int = 5
+    history_limit: int = 500
     session_mode: str = SessionMode.ASK.value
     cache_max_bytes: int = 1024**3
     restore_session: bool = True
@@ -140,6 +141,9 @@ class AuenConfig:
                 "[search]",
                 f"search_result_count = {self.search_result_count}",
                 "",
+                "[history]",
+                f"history_limit = {self.history_limit}",
+                "",
                 "[cache]",
                 f"cache_dir = {_toml_string(str(self.cache_dir))}",
                 f"cache_max_bytes = {self.cache_max_bytes}",
@@ -170,6 +174,8 @@ class AuenConfig:
             raise ValueError("max_download_threads must be at least 1")
         if self.search_result_count < 1:
             raise ValueError("load more amount must be at least 1")
+        if self.history_limit < 1:
+            raise ValueError("history limit must be at least 1")
         if self.cache_max_bytes < 0:
             raise ValueError("cache_max_bytes cannot be negative")
         if not self.theme.strip():

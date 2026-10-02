@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 TrackPreparer = Callable[[Track], str]
 TrackCallback = Callable[[Track | None], None]
+TrackStartedCallback = Callable[[Track], None]
 ErrorCallback = Callable[[Track, Exception], None]
 
 
@@ -28,12 +29,14 @@ class PlaybackController:
         *,
         prepare: TrackPreparer | None = None,
         on_track_changed: TrackCallback | None = None,
+        on_track_started: TrackStartedCallback | None = None,
         on_error: ErrorCallback | None = None,
     ) -> None:
         self.playlist = playlist
         self.backend = backend
         self.prepare = prepare or (lambda track: track.playable_uri)
         self.on_track_changed = on_track_changed
+        self.on_track_started = on_track_started
         self.on_error = on_error
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -67,6 +70,8 @@ class PlaybackController:
                 self._skip_requested.clear()
                 self.backend.play(uri)
                 self.backend.set_volume(self.status.volume)
+                if self.on_track_started is not None:
+                    self.on_track_started(track)
             except Exception as exc:
                 self.playlist.mark_played(track)
                 self._report_error(track, exc)

@@ -17,6 +17,7 @@ def test_config_defaults() -> None:
     assert config.repeat_mode == "off"
     assert config.stream_first is True
     assert config.search_result_count == 5
+    assert config.history_limit == 500
     assert config.session_mode == "ask"
     assert config.cache_max_bytes == 1024**3
     assert config.restore_session is True
@@ -98,3 +99,6 @@ def test_config_rejects_invalid_values() -> None:
 
     with pytest.raises(ValueError, match="volume"):
         config.validate()
+
+    with pytest.raises(ValueError, match="history limit"):
+        AuenConfig(history_limit=0).validate()

@@ -122,6 +122,33 @@ def test_enqueue_is_immediately_persisted_and_restored(tmp_path: Path) -> None:
         assert [item.track_id for item in restored.playlist.queue_list] == [track.track_id]
 
 
+def test_enqueue_next_places_track_at_front(tmp_path: Path) -> None:
+    config = AuenConfig(config_dir=tmp_path, cache_dir=tmp_path / "cache")
+    state, cache, downloads = make_dependencies(tmp_path)
+    first = make_track("first")
+    next_track = make_track("next")
+
+    with AuenSession(config, state=state, cache=cache, downloads=downloads) as session:
+        session.enqueue(first)
+        session.enqueue_next(next_track)
+
+        assert session.playlist.queue_list == [next_track, first]
+
+
+def test_session_applies_configured_history_limit_on_startup(tmp_path: Path) -> None:
+    state, cache, downloads = make_dependencies(tmp_path)
+    for title in ("first", "second", "third"):
+        state.record_play(make_track(title))
+    config = AuenConfig(
+        config_dir=tmp_path,
+        cache_dir=tmp_path / "cache",
+        history_limit=2,
+    )
+
+    with AuenSession(config, state=state, cache=cache, downloads=downloads) as session:
+        assert len(session.recent_history()) == 2
+
+
 def test_close_is_idempotent(tmp_path: Path) -> None:
     config = AuenConfig(config_dir=tmp_path, cache_dir=tmp_path / "cache")
     state, cache, downloads = make_dependencies(tmp_path)
@@ -212,3 +239,6 @@ def test_playback_changes_are_persisted_from_worker_thread(tmp_path: Path) -> No
 
         assert snapshot.current_track is None
         assert [item.track_id for item in snapshot.history] == [track.track_id]
+        recent = session.recent_history()
+        assert [entry.track.track_id for entry in recent] == [track.track_id]
+        assert recent[0].play_count == 1

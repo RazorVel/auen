@@ -8,7 +8,15 @@ from typing import TYPE_CHECKING
 from auen.cache import CacheEntry, CacheManager
 from auen.downloads import DownloadManager
 from auen.media.youtube import YouTubeService, is_youtube_url
-from auen.models import MediaCollection, RepeatMode, SearchItem, SessionMode, Track, TrackSource
+from auen.models import (
+    HistoryEntry,
+    MediaCollection,
+    RepeatMode,
+    SearchItem,
+    SessionMode,
+    Track,
+    TrackSource,
+)
 from auen.player import PlaybackController
 from auen.playlist import Playlist
 from auen.state import SessionSnapshot, StateStore
@@ -35,6 +43,7 @@ class AuenSession:
     ) -> None:
         self.config = config
         self.state = state or StateStore(config.state_dir / "state.sqlite3")
+        self.state.prune_recent_history(config.history_limit)
         self.cache = cache or CacheManager(
             config.cache_dir,
             max_cache_bytes=config.cache_max_bytes,
@@ -54,6 +63,7 @@ class AuenSession:
         self.player: PlaybackController | None = None
         self.session_mode = SessionMode(config.session_mode)
         self.on_track_changed: Callable[[Track | None], None] | None = None
+        self.on_history_changed: Callable[[], None] | None = None
         self.on_playback_error: Callable[[Track, Exception], None] | None = None
         self._temporary_uris: set[str] = set()
         self._closed = False
@@ -99,6 +109,34 @@ class AuenSession:
             return self._auto_cache_executor.submit(self._cache_queued_track, track)
         return None
 
+    def enqueue_next(
+        self,
+        track: Track,
+        *,
+        session_mode: SessionMode = SessionMode.STREAM_ONLY,
+    ) -> Future[CacheEntry] | None:
+        """Place a track at the front of the queue and persist it."""
+        cached = self.cache.get(track.uri)
+        if cached is not None:
+            track.cached_path = cached.path
+        self.playlist.add_next(track)
+        self.save()
+        if session_mode is SessionMode.STREAM_AND_CACHE and not track.is_cached:
+            return self._auto_cache_executor.submit(self._cache_queued_track, track)
+        return None
+
+    def recent_history(self) -> list[HistoryEntry]:
+        return self.state.load_recent_history(limit=self.config.history_limit)
+
+    def remove_recent_history(self, uri: str) -> bool:
+        return self.state.remove_recent_history(uri)
+
+    def clear_recent_history(self) -> None:
+        self.state.clear_recent_history()
+
+    def prune_recent_history(self) -> None:
+        self.state.prune_recent_history(self.config.history_limit)
+
     def _cache_queued_track(self, track: Track) -> CacheEntry:
         """Serialize automatic caching so it cannot saturate playback bandwidth."""
         return self.downloads.submit(track).result()
@@ -128,6 +166,7 @@ class AuenSession:
             backend,
             prepare=self._prepare_track,
             on_track_changed=self._track_changed,
+            on_track_started=self._track_started,
             on_error=self._playback_error,
         )
         self.player.set_volume(self.config.volume)
@@ -213,6 +252,11 @@ class AuenSession:
         self.save()
         if self.on_track_changed is not None:
             self.on_track_changed(track)
+
+    def _track_started(self, track: Track) -> None:
+        self.state.record_play(track, limit=self.config.history_limit)
+        if self.on_history_changed is not None:
+            self.on_history_changed()
 
     def _playback_error(self, track: Track, error: Exception) -> None:
         self.save()

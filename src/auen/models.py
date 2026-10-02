@@ -1,6 +1,7 @@
 """Domain models for the auen audio player."""
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
 from uuid import uuid4
@@ -65,6 +66,15 @@ class Track:
         if self.stream_url is not None:
             return self.stream_url
         return self.uri
+
+
+@dataclass(slots=True)
+class HistoryEntry:
+    """One unique track in the durable recently played history."""
+
+    track: Track
+    last_played_at: datetime
+    play_count: int = 1
 
 
 @dataclass(slots=True)

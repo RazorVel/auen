@@ -4,10 +4,9 @@
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Prototype status — v0.1.1:** Linux playback has been manually exercised with `mpv`.
-> The Termux backend and responsive phone layout are implemented and automatically
-> tested. Basic playback has now been exercised on a physical Android device; the full
-> validation checklist is still in progress.
+> **Development status — v0.2.0:** v0.1.1 is the current tagged prototype. Core playback,
+> responsive rendering, and shutdown behavior have been exercised with `mpv` on Linux and
+> a physical Termux device. v0.2.0 adds a durable Recently Played view.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
@@ -15,21 +14,23 @@ size-limited persistent playback cache.
 
 ![auen in a narrow terminal](docs/assets/auen-narrow.svg)
 
-## What works in v0.1.1
+## What works in the v0.2.0 development branch
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
 - Stream immediately or stream while retaining a managed offline copy.
 - Play, pause, jump to a timestamp, seek by 10 seconds, and skip tracks with `mpv`.
 - Add duplicate tracks with confirmation; play any queued row now or move its priority.
-- Persist the queue, played history, cached media, settings, and playback position across
-  restarts and crashes.
+- Persist the queue, recently played tracks, cached media, settings, and playback position
+  across restarts and crashes.
+- Open Recently Played with `h`, including last-played timestamps and play counts; play now,
+  play next, remove individual entries, or clear history with confirmation.
 - Preview and save themes, with an adaptive side-by-side or stacked phone-width layout.
 - Configure behavior through the TUI or scriptable `auen config` commands.
 
-This is intentionally an early prototype. A visible History view, named playlists,
-offline-library management, `:` command mode, and local directory import are planned for
-later versions. Some YouTube videos may require account cookies and cannot yet be played.
+This is intentionally an early prototype. Named playlists, offline-library management,
+`:` command mode, and local directory import are planned for later versions. Some YouTube
+videos may require account cookies and cannot yet be played.
 
 ## Requirements
 
@@ -55,12 +56,6 @@ Install the tagged prototype directly from GitHub:
 pipx install 'git+https://github.com/razorvel/auen.git@v0.1.1'
 auen doctor
 auen
-```
-
-Alternatively, download the release wheel and install it with:
-
-```console
-pipx install ./auen-0.1.1-py3-none-any.whl
 ```
 
 For a checked-out source tree, use `pipx install .`. A regular virtual environment also
@@ -92,8 +87,7 @@ When installed, mpv is selected automatically and provides seeking, direct strea
 volume control, and precise position reporting. Termux:API remains the fallback backend,
 but its media-player interface does not provide seeking.
 
-Do not treat v0.1.1 as fully Termux-validated yet. The real-device test sequence and
-expected limitations are recorded in
+The real-device test sequence and expected limitations are recorded in
 [`docs/termux-testing.md`](docs/termux-testing.md).
 
 ## Essential controls
@@ -108,6 +102,7 @@ expected limitations are recorded in
 | `[` / `]` | Seek backward or forward 10 seconds |
 | `g` | Jump to a timestamp |
 | `n` | Play next track |
+| `h` | Open or leave Recently Played |
 | `d` | Retain the selected result for offline playback |
 | `Home` | Promote the selected queued track to play next |
 | `Shift+Up` / `Shift+Down` | Change queue priority |
@@ -115,6 +110,10 @@ expected limitations are recorded in
 | `F2` | Open Settings |
 | `F3` | Preview and select a theme |
 | `q` | Quit and stop playback |
+
+In Recently Played, Enter plays the selected track now, Home places it next, `a` appends it
+to Queue, Delete removes one entry, `c` clears all history after confirmation, and Escape
+returns to the exact prior Results view.
 
 Left and Right page through a long selected title. Leaving that row restores its title to
 the beginning. Playback seeking deliberately uses `[` and `]`, so arrow keys remain safe
@@ -127,6 +126,7 @@ auen config list
 auen config get cache.max_size
 auen config set cache.max_size 1.5GB
 auen config set session.mode stream_and_cache
+auen config set history.limit 500
 auen config reset playback.volume
 ```
 
