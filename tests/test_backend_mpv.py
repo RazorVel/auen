@@ -107,6 +107,15 @@ def test_detect_backend_auto_mpv(mock_which: MagicMock) -> None:
 
 
 @patch("shutil.which")
+def test_detect_backend_auto_prefers_mpv_over_termux_api(mock_which: MagicMock) -> None:
+    mock_which.side_effect = lambda name: f"/usr/bin/{name}"
+
+    backend = detect_backend("auto")
+
+    assert isinstance(backend, MpvBackend)
+
+
+@patch("shutil.which")
 def test_detect_backend_nothing(mock_which: MagicMock) -> None:
     mock_which.return_value = None
     with pytest.raises(RuntimeError):

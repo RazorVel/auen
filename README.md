@@ -4,9 +4,10 @@
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Prototype status — v0.1.0:** Linux playback has been manually exercised with `mpv`.
+> **Prototype status — v0.1.1:** Linux playback has been manually exercised with `mpv`.
 > The Termux backend and responsive phone layout are implemented and automatically
-> tested, but playback has not yet been validated on a physical Android/Termux device.
+> tested. Basic playback has now been exercised on a physical Android device; the full
+> validation checklist is still in progress.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
@@ -14,7 +15,7 @@ size-limited persistent playback cache.
 
 ![auen in a narrow terminal](docs/assets/auen-narrow.svg)
 
-## What works in v0.1.0
+## What works in v0.1.1
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
@@ -51,7 +52,7 @@ pipx ensurepath
 Install the tagged prototype directly from GitHub:
 
 ```console
-pipx install 'git+https://github.com/razorvel/auen.git@v0.1.0'
+pipx install 'git+https://github.com/razorvel/auen.git@v0.1.1'
 auen doctor
 auen
 ```
@@ -59,7 +60,7 @@ auen
 Alternatively, download the release wheel and install it with:
 
 ```console
-pipx install ./auen-0.1.0-py3-none-any.whl
+pipx install ./auen-0.1.1-py3-none-any.whl
 ```
 
 For a checked-out source tree, use `pipx install .`. A regular virtual environment also
@@ -81,14 +82,19 @@ their signatures are compatible. Then, inside Termux:
 
 ```console
 pkg update
-pkg install python git termux-api
-python -m pip install 'git+https://github.com/razorvel/auen.git@v0.1.0'
+pkg install python git termux-api mpv
+python -m pip install 'git+https://github.com/razorvel/auen.git@v0.1.1'
 auen doctor
 auen
 ```
 
-Do not treat v0.1.0 as Termux-validated yet. The real-device test sequence and expected
-limitations are recorded in [`docs/termux-testing.md`](docs/termux-testing.md).
+When installed, mpv is selected automatically and provides seeking, direct streaming,
+volume control, and precise position reporting. Termux:API remains the fallback backend,
+but its media-player interface does not provide seeking.
+
+Do not treat v0.1.1 as fully Termux-validated yet. The real-device test sequence and
+expected limitations are recorded in
+[`docs/termux-testing.md`](docs/termux-testing.md).
 
 ## Essential controls
 

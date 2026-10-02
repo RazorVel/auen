@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from rich.cells import cell_len
 from textual.containers import Horizontal
-from textual.widgets import DataTable, Input, Label
+from textual.widgets import Button, DataTable, Footer, Input, Label, Select
 
 from auen.app import (
     AuenApp,
@@ -19,6 +19,7 @@ from auen.app import (
     ThemeScreen,
     _emoji_safety_gutter,
     _format_timestamp,
+    _is_termux_environment,
     _merge_search_items,
     _parse_timestamp,
     _stabilize_terminal_emoji,
@@ -440,6 +441,65 @@ def test_run_closes_session_after_unhandled_ui_error(tmp_path: Path) -> None:
     app.session.close.assert_called_once_with()
 
 
+def test_run_preserves_ui_error_when_backend_cleanup_also_fails(tmp_path: Path) -> None:
+    app = MagicMock()
+    app.run.side_effect = RuntimeError("UI crash")
+    app.session.close.side_effect = RuntimeError("backend stop timed out")
+
+    with (
+        patch("auen.app.AuenConfig.load", return_value=AuenConfig(config_dir=tmp_path)),
+        patch("auen.app.detect_backend", return_value=MagicMock()),
+        patch("auen.app.AuenApp", return_value=app),
+        pytest.raises(RuntimeError, match="UI crash"),
+    ):
+        run()
+
+    app.session.close.assert_called_once_with()
+
+
+def test_run_migrates_termux_preference_when_mpv_is_available(tmp_path: Path) -> None:
+    config = AuenConfig(config_dir=tmp_path, backend="termux")
+    app = MagicMock()
+
+    with (
+        patch("auen.app.AuenConfig.load", return_value=config),
+        patch("auen.app._is_termux_environment", return_value=True),
+        patch("auen.app.shutil.which", return_value="/data/data/com.termux/files/usr/bin/mpv"),
+        patch("auen.app.detect_backend", return_value=MagicMock()) as detect,
+        patch("auen.app.AuenApp", return_value=app),
+    ):
+        run()
+
+    assert config.backend == "auto"
+    detect.assert_called_once_with("auto")
+    app.run.assert_called_once_with()
+
+
+async def test_unmount_suppresses_backend_cleanup_error(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    app.session.close = MagicMock(side_effect=RuntimeError("stop timed out"))  # type: ignore[method-assign]
+
+    async with app.run_test():
+        pass
+
+
+async def test_termux_settings_hide_fallback_when_mpv_is_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TERMUX_VERSION", "0.118")
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    with patch("auen.app.shutil.which", return_value="/data/data/com.termux/files/usr/bin/mpv"):
+        async with app.run_test() as pilot:
+            await pilot.press("f2")
+            backend = app.screen.query_one("#backend", Select)
+            values = {value for _prompt, value in backend._options}
+
+            assert {"auto", "mpv"} <= values
+            assert "termux" not in values
+            assert not app.screen.query(Footer)
+
+
 async def test_arabic_title_is_directionally_isolated_from_time(tmp_path: Path) -> None:
     app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
     result = Track(
@@ -519,6 +579,78 @@ async def test_workspace_stacks_on_narrow_terminals_and_restores_wide_layout(
         assert not workspace.has_class("narrow")
         assert results_pane.region.y == queue_pane.region.y
         assert results_pane.region.x < queue_pane.region.x
+
+
+async def test_narrow_layout_uses_compact_playback_labels(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test(size=(60, 30)):
+        assert str(app.query_one("#seek-back", Button).label) == "-10s ["
+        assert str(app.query_one("#play-pause", Button).label) == "Play/Pause"
+        assert str(app.query_one("#seek-forward", Button).label) == "+10s ]"
+        assert str(app.query_one("#jump-time", Button).label) == "Jump g"
+        assert str(app.query_one("#next-track", Button).label) == "Next n"
+
+
+def test_footer_hides_actions_already_shown_as_playback_buttons() -> None:
+    bindings = {binding.key: binding for binding in AuenApp.BINDINGS}
+
+    for key in ("space", "n", "[", "]", "g"):
+        assert not bindings[key].show
+    for key in ("/", "d", "f2", "f3", "q"):
+        assert bindings[key].show
+
+
+def test_saving_unchanged_settings_does_not_resend_volume(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    app.session.player = player
+    app._settings_volume_before = app.config.volume
+
+    app._settings_closed(True)
+
+    player.set_volume.assert_not_called()
+
+
+def test_saving_changed_volume_updates_active_player(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    app.session.player = player
+    app._settings_volume_before = app.config.volume
+    app.config.volume = 55
+
+    app._settings_closed(True)
+
+    player.set_volume.assert_called_once_with(55)
+
+
+def test_termux_environment_disables_directional_control_characters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERMUX_VERSION", "0.118")
+
+    rendered, _page = _title_cell("Arabic أغنية", 30, 0)
+
+    assert _is_termux_environment()
+    assert "\u2066" not in rendered
+    assert "\u2069" not in rendered
+
+
+async def test_termux_environment_marks_main_and_theme_screens_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test(size=(60, 30)) as pilot:
+        assert app.screen.has_class("termux-safe")
+        assert app.query_one("#results-pane").styles.border_top[0] == "ascii"
+
+        await pilot.press("f3")
+        assert isinstance(app.screen, ThemeScreen)
+        assert app.screen.has_class("termux-safe")
+        assert app.screen.query_one("#theme-dialog").styles.border_top[0] == "ascii"
+        assert app.screen.query_one("#theme-list").styles.border_top[0] == ""
 
 
 async def test_collection_opens_tracks_and_escape_returns_to_search(tmp_path: Path) -> None:

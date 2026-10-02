@@ -97,3 +97,27 @@ def test_doctor_checks_the_bundled_ytdlp_module_not_a_global_command(
 
     output = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "yt-dlp Python package was not found" in output
+
+
+def test_doctor_reports_mpv_as_preferred_when_both_backends_exist(
+    tmp_path: Path, capsys: object
+) -> None:
+    commands = {
+        "mpv": "/data/data/com.termux/files/usr/bin/mpv",
+        "termux-media-player": "/data/data/com.termux/files/usr/bin/termux-media-player",
+        "termux-volume": "/data/data/com.termux/files/usr/bin/termux-volume",
+    }
+    with (
+        patch("auen.config.user_config_dir", return_value=str(tmp_path)),
+        patch("auen.cli.shutil.which", side_effect=lambda name: commands.get(name)),
+        patch(
+            "auen.cli.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "No track currently!", ""),
+        ),
+    ):
+        assert main(["doctor"]) == 0
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "mpv" in output
+    assert "preferred by automatic backend" in output
+    assert "Termux media player" in output

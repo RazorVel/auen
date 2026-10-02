@@ -173,6 +173,8 @@ def _doctor() -> int:
 
     termux = shutil.which("termux-media-player")
     mpv = shutil.which("mpv")
+    if mpv:
+        print(f"[ok] mpv: {mpv} (preferred by automatic backend)")
     if termux:
         print(f"[ok] Termux media player: {termux}")
         volume = shutil.which("termux-volume")
@@ -199,9 +201,7 @@ def _doctor() -> int:
                 detail = (probe.stderr or probe.stdout).strip()
                 print(f"[fail] Termux:API companion: {detail or 'command failed'}")
                 problems += 1
-    elif mpv:
-        print(f"[ok] mpv: {mpv}")
-    else:
+    if not mpv and not termux:
         print("[fail] No playback backend found (mpv or termux-media-player)")
         problems += 1
 

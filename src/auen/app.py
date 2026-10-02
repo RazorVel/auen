@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
+import os
+import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -153,6 +156,9 @@ class SessionModeScreen(ModalScreen[SessionMode]):
         border: round $accent;
         background: $surface;
     }
+    SessionModeScreen.termux-safe #session-dialog {
+        border: ascii $accent;
+    }
     #session-dialog Button {
         width: 1fr;
         margin-top: 1;
@@ -169,6 +175,9 @@ class SessionModeScreen(ModalScreen[SessionMode]):
             with Horizontal():
                 yield Button("Stream only", id="stream-only")
                 yield Button("Stream + cache", id="stream-cache", variant="primary")
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
 
     @on(Button.Pressed)
     def select_mode(self, event: Button.Pressed) -> None:
@@ -203,6 +212,9 @@ class DuplicateQueueScreen(ModalScreen[bool]):
     #duplicate-actions Button {
         margin-left: 1;
     }
+    DuplicateQueueScreen.termux-safe #duplicate-dialog {
+        border: ascii $warning;
+    }
     """
 
     def __init__(self, track: Track) -> None:
@@ -218,6 +230,7 @@ class DuplicateQueueScreen(ModalScreen[bool]):
                 yield Button("Add again", id="confirm-duplicate", variant="warning")
 
     def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
         self.query_one("#cancel-duplicate", Button).focus()
 
     @on(Button.Pressed, "#cancel-duplicate")
@@ -257,6 +270,9 @@ class LoadMoreScreen(ModalScreen[bool]):
     #load-more-actions Button {
         margin-left: 1;
     }
+    LoadMoreScreen.termux-safe #load-more-dialog {
+        border: ascii $accent;
+    }
     """
 
     def __init__(self, count: int) -> None:
@@ -272,6 +288,7 @@ class LoadMoreScreen(ModalScreen[bool]):
                 yield Button("Load more", id="confirm-load-more", variant="primary")
 
     def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
         self.query_one("#cancel-load-more", Button).focus()
 
     @on(Button.Pressed, "#cancel-load-more")
@@ -310,6 +327,12 @@ class ThemeScreen(ModalScreen[str | None]):
     #theme-list {
         height: 1fr;
     }
+    ThemeScreen.termux-safe #theme-dialog {
+        border: ascii $accent;
+    }
+    ThemeScreen.termux-safe #theme-list {
+        border: none;
+    }
     """
 
     def __init__(self, config: AuenConfig, themes: list[str]) -> None:
@@ -325,6 +348,7 @@ class ThemeScreen(ModalScreen[str | None]):
             yield OptionList(*self.themes, id="theme-list")
 
     def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
         options = self.query_one("#theme-list", OptionList)
         if self.original_theme in self.themes:
             options.highlighted = self.themes.index(self.original_theme)
@@ -370,6 +394,9 @@ class SeekScreen(ModalScreen[float | None]):
     #seek-time {
         margin-top: 1;
     }
+    SeekScreen.termux-safe #seek-dialog {
+        border: ascii $accent;
+    }
     """
 
     def __init__(self, duration_seconds: float | None) -> None:
@@ -388,6 +415,7 @@ class SeekScreen(ModalScreen[float | None]):
             yield Input(placeholder="Example: 90 or 1:30", id="seek-time")
 
     def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
         self.query_one("#seek-time", Input).focus()
 
     @on(Input.Submitted, "#seek-time")
@@ -464,8 +492,11 @@ class SettingsScreen(Screen[bool]):
         with VerticalScroll(id="settings-form"):
             with Horizontal(classes="setting-row"):
                 yield Label("Playback backend")
+                backend_options = [("Automatic (mpv preferred)", "auto"), ("mpv", "mpv")]
+                if not (_is_termux_environment() and shutil.which("mpv")):
+                    backend_options.append(("Termux:API fallback (no seek)", "termux"))
                 yield Select(
-                    [("Automatic", "auto"), ("mpv", "mpv"), ("Termux", "termux")],
+                    backend_options,
                     value=self.config.backend,
                     id="backend",
                 )
@@ -515,7 +546,6 @@ class SettingsScreen(Screen[bool]):
         with Horizontal(id="settings-actions"):
             yield Button("Cancel", id="cancel")
             yield Button("Save", id="save", variant="primary")
-        yield Footer()
 
     @staticmethod
     def _input_row(label: str, widget_id: str, value: str) -> ComposeResult:
@@ -584,17 +614,17 @@ class AuenApp(App[None]):
     SUB_TITLE = "terminal audio"
     NARROW_BREAKPOINT = 88
     BINDINGS: ClassVar[list[BindingType]] = [
-        ("/", "focus_search", "⌕ Search"),
-        ("space", "toggle_playback", "▶/Ⅱ Play"),
-        ("n", "next_track", "» Next"),
-        ("[", "seek_backward", "← 10s"),
-        ("]", "seek_forward", "10s →"),
-        ("g", "go_to_time", "↪ Time"),
-        ("d", "download_selected", "↓ Offline"),
-        ("delete", "remove_queued", "Del Remove"),
-        ("f2", "settings", "⚙ Settings"),
-        ("f3", "change_theme", "◐ Theme"),
-        ("q", "quit", "q Quit"),
+        Binding("/", "focus_search", "⌕ Search"),
+        Binding("space", "toggle_playback", "▶/Ⅱ Play", show=False),
+        Binding("n", "next_track", "» Next", show=False),
+        Binding("[", "seek_backward", "← 10s", show=False),
+        Binding("]", "seek_forward", "10s →", show=False),
+        Binding("g", "go_to_time", "↪ Time", show=False),
+        Binding("d", "download_selected", "↓ Offline"),
+        Binding("delete", "remove_queued", "Del Remove"),
+        Binding("f2", "settings", "⚙ Settings"),
+        Binding("f3", "change_theme", "◐ Theme"),
+        Binding("q", "quit", "q Quit"),
     ]
 
     CSS = """
@@ -630,6 +660,9 @@ class AuenApp(App[None]):
     #workspace.narrow #queue-pane {
         margin-left: 0;
         margin-top: 0;
+    }
+    Screen.termux-safe .pane {
+        border: ascii $panel-lighten-2;
     }
     .pane-title {
         text-style: bold;
@@ -714,6 +747,9 @@ class AuenApp(App[None]):
         self._search_loading = False
         self._title_pages: dict[tuple[str, str], int] = {}
         self._last_saved_position = 0.0
+        self._settings_backend_before = self.config.backend
+        self._settings_mode_before = self.config.session_mode
+        self._settings_volume_before = self.config.volume
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -750,6 +786,7 @@ class AuenApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.screen.set_class(_is_termux_environment(), "termux-safe")
         self._apply_responsive_layout(self.size.width)
         results = self.query_one("#results", DataTable)
         results.cell_padding = 0
@@ -779,10 +816,31 @@ class AuenApp(App[None]):
 
     def _apply_responsive_layout(self, width: int) -> None:
         workspace = self.query_one("#workspace", Horizontal)
-        workspace.set_class(width < self.NARROW_BREAKPOINT, "narrow")
+        narrow = width < self.NARROW_BREAKPOINT
+        workspace.set_class(narrow, "narrow")
+        labels = (
+            {
+                "#seek-back": "-10s [",
+                "#play-pause": "Play/Pause",
+                "#seek-forward": "+10s ]",
+                "#jump-time": "Jump g",
+                "#next-track": "Next n",
+            }
+            if narrow or _is_termux_environment()
+            else {
+                "#seek-back": "← 10s  [",
+                "#play-pause": "␣ Play/Pause",
+                "#seek-forward": "10s →  ]",
+                "#jump-time": "↪ Jump  g",
+                "#next-track": "» Next  n",
+            }
+        )
+        for selector, label in labels.items():
+            self.query_one(selector, Button).label = label
 
     def on_unmount(self) -> None:
-        self.session.close()
+        with contextlib.suppress(Exception):
+            self.session.close()
 
     @on(Input.Submitted, "#search-bar")
     def search_submitted(self, event: Input.Submitted) -> None:
@@ -1317,6 +1375,9 @@ class AuenApp(App[None]):
         self.action_focus_next()
 
     def action_settings(self) -> None:
+        self._settings_backend_before = self.config.backend
+        self._settings_mode_before = self.config.session_mode
+        self._settings_volume_before = self.config.volume
         self.push_screen(SettingsScreen(self.config), self._settings_closed)
 
     def action_change_theme(self) -> None:
@@ -1336,9 +1397,23 @@ class AuenApp(App[None]):
         self.session.playlist.repeat_mode = RepeatMode(self.config.repeat_mode)
         self.session.cache.max_cache_bytes = self.config.cache_max_bytes
         self.session.cache.prune()
-        if self.session.player is not None:
+        if (
+            self.session.player is not None
+            and self.config.volume != self._settings_volume_before
+        ):
             self.session.player.set_volume(self.config.volume)
         self.session.save()
+        restart_changes: list[str] = []
+        if self.config.backend != self._settings_backend_before:
+            restart_changes.append("backend")
+        if self.config.session_mode != self._settings_mode_before:
+            restart_changes.append("startup mode")
+        if restart_changes:
+            self.notify(
+                f"Restart auen to apply: {', '.join(restart_changes)}",
+                title="Restart required",
+                severity="warning",
+            )
 
     def action_toggle_playback(self) -> None:
         if self.session.player is not None:
@@ -1427,6 +1502,12 @@ class AuenApp(App[None]):
 def run() -> None:
     """Launch the interactive application."""
     config = AuenConfig.load()
+    if config.backend == "termux" and _is_termux_environment() and shutil.which("mpv"):
+        # v0.1.0 exposed the limited Termux:API backend directly. Prefer the
+        # richer native mpv package once it becomes available.
+        config.backend = "auto"
+        with contextlib.suppress(OSError, ValueError):
+            config.save()
     try:
         backend = detect_backend(config.backend)
         backend_error = None
@@ -1439,7 +1520,8 @@ def run() -> None:
     finally:
         # Textual may not dispatch Unmount after an unhandled UI exception.
         # Always stop playback and owned workers before returning to the shell.
-        app.session.close()
+        with contextlib.suppress(Exception):
+            app.session.close()
 
 
 def _parse_timestamp(value: str) -> float:
@@ -1495,7 +1577,10 @@ def _title_cell(value: str, width: int, page: int) -> tuple[str, int]:
         max(1, width - _emoji_safety_gutter(value)),
         page,
     )
-    return _isolate_ltr(rendered), selected
+    return (
+        rendered if _is_termux_environment() else _isolate_ltr(rendered),
+        selected,
+    )
 
 
 def _stabilize_terminal_emoji(value: str) -> str:
@@ -1566,3 +1651,9 @@ def _result_detail(item: SearchItem) -> str:
 def _isolate_ltr(value: str) -> str:
     """Keep bidirectional title text from reordering adjacent table columns."""
     return f"\N{LEFT-TO-RIGHT ISOLATE}{value}\N{POP DIRECTIONAL ISOLATE}"
+
+
+def _is_termux_environment() -> bool:
+    """Detect Termux without depending on optional Termux:API commands."""
+    prefix = os.environ.get("PREFIX", "")
+    return "TERMUX_VERSION" in os.environ or prefix.startswith("/data/data/com.termux/")
