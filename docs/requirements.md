@@ -7,9 +7,9 @@ implementation to preserve.
 ## Product
 
 auen is a full-screen, keyboard-first Textual audio player. Its interface should work in
-Unix terminals. Version 0.1 supports playback on Linux through `mpv` and Android/Termux
-through Termux:API. Playback backends advertise capabilities so additional platforms can
-be introduced without changing the queue, media, persistence, or UI layers.
+Unix terminals. The current prototype supports playback through `mpv` on Linux and
+Android/Termux. Playback backends advertise capabilities so additional platforms can be
+introduced without changing the queue, media, persistence, or UI layers.
 
 ## Media sources
 
@@ -42,9 +42,6 @@ At session start, ask whether to use:
 1. **Stream only** — do not retain persistent remote media.
 2. **Stream and cache** — begin playback as quickly as the backend permits and retain a
    managed copy for offline use.
-
-Termux may require a temporary local download even in stream-only mode. Temporary media
-must be removed after playback.
 
 The automatic playback cache persists between sessions and defaults to a 1 GiB limit.
 Least-recently-used, unpinned items may be evicted. Tracks explicitly saved to the offline

@@ -32,6 +32,19 @@ def make_track(title: str) -> Track:
     )
 
 
+def test_default_services_share_youtube_request_gate(tmp_path: Path) -> None:
+    config = AuenConfig(
+        config_dir=tmp_path,
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        session_mode=SessionMode.STREAM_ONLY.value,
+    )
+
+    with AuenSession(config) as session:
+        assert session.youtube.request_gate is session.youtube_requests
+        assert session.downloads.request_gate is session.youtube_requests
+
+
 class FakeBackend(AudioBackend):
     def __init__(self) -> None:
         self.played: list[str] = []

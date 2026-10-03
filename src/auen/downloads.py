@@ -13,8 +13,14 @@ from typing import TYPE_CHECKING, Any
 from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
 from yt_dlp.utils import DownloadError  # type: ignore[import-untyped]
 
-from auen.media.youtube import is_youtube_url
+from auen.media.youtube import (
+    is_temporary_youtube_block,
+    is_youtube_url,
+    youtube_blocked_message,
+    youtube_error_message,
+)
 from auen.models import Track, TrackSource
+from auen.youtube_policy import YouTubeCooldownError, YouTubeRequestGate
 
 if TYPE_CHECKING:
     from auen.cache import CacheEntry, CacheManager
@@ -27,11 +33,18 @@ class DownloadServiceError(RuntimeError):
 class DownloadManager:
     """Download at most a configured number of distinct tracks concurrently."""
 
-    def __init__(self, cache: CacheManager, *, max_workers: int = 4) -> None:
+    def __init__(
+        self,
+        cache: CacheManager,
+        *,
+        max_workers: int = 4,
+        request_gate: YouTubeRequestGate | None = None,
+    ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
         self.cache = cache
         self.max_workers = max_workers
+        self.request_gate = request_gate or YouTubeRequestGate()
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="auen-dl")
         self._lock = threading.RLock()
         self._inflight: dict[str, Future[CacheEntry]] = {}
@@ -96,10 +109,16 @@ class DownloadManager:
             "no_warnings": True,
         }
         try:
+            self.request_gate.wait_turn()
             with YoutubeDL(options) as ydl:
                 ydl.extract_info(track.uri, download=True)
-        except DownloadError as exc:
+        except YouTubeCooldownError as exc:
             raise DownloadServiceError(str(exc)) from exc
+        except DownloadError as exc:
+            if is_temporary_youtube_block(exc):
+                remaining = self.request_gate.block()
+                raise DownloadServiceError(youtube_blocked_message(remaining)) from exc
+            raise DownloadServiceError(youtube_error_message(exc)) from exc
 
         files = [
             candidate

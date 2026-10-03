@@ -6,11 +6,15 @@ import asyncio
 import contextlib
 import math
 import os
+import re
 import shutil
+import threading
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
+from anyascii import anyascii
 from rich.cells import cell_len, chop_cells
 from textual import events, on, work
 from textual.app import App, ComposeResult
@@ -45,6 +49,7 @@ from auen.models import (
     SearchItem,
     SessionMode,
     Track,
+    TrackSource,
 )
 from auen.session import AuenSession
 
@@ -57,6 +62,7 @@ if TYPE_CHECKING:
     from textual.binding import BindingType
 
     from auen.backends.base import AudioBackend
+    from auen.cache import CacheEntry
 
 
 class SearchInput(Input):
@@ -129,6 +135,7 @@ class TrackTable(DataTable[object]):
             self.id == "queue"
             or self.has_class("history-view")
             or self.has_class("playlist-tracks")
+            or self.has_class("library-view")
         ):
             self.post_message(self.QueuePlayNextRequested(self))
         else:
@@ -150,6 +157,8 @@ class ResultsViewState:
     playlists: list[SavedPlaylist] | None
     active_playlist: SavedPlaylist | None
     playlist_tracks: list[Track] | None
+    library_entries: list[CacheEntry] | None
+    library_filter: str | None
 
 
 class SessionModeScreen(ModalScreen[SessionMode]):
@@ -632,6 +641,66 @@ class QueuePlaylistScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class DeleteOfflineScreen(ModalScreen[bool]):
+    """Confirm deleting one managed offline media file."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    DeleteOfflineScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #delete-offline-dialog {
+        width: 58;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+    #delete-offline-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #delete-offline-actions Button {
+        margin-left: 1;
+    }
+    DeleteOfflineScreen.termux-safe #delete-offline-dialog {
+        border: ascii $warning;
+    }
+    """
+
+    def __init__(self, entry: CacheEntry) -> None:
+        super().__init__()
+        self.entry = entry
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-offline-dialog"):
+            yield Label("Delete offline media?", classes="dialog-title")
+            yield Static(
+                f'Delete "{self.entry.title}" ({_format_bytes(self.entry.size_bytes)})?'
+            )
+            with Horizontal(id="delete-offline-actions"):
+                yield Button("Cancel", id="cancel-delete-offline")
+                yield Button("Delete media", id="confirm-delete-offline", variant="warning")
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
+        self.query_one("#cancel-delete-offline", Button).focus()
+
+    @on(Button.Pressed, "#cancel-delete-offline")
+    def cancel_pressed(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-delete-offline")
+    def confirm_pressed(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class ThemeScreen(ModalScreen[str | None]):
     """Preview installed Textual themes and save only explicit selection."""
 
@@ -967,8 +1036,10 @@ class AuenApp(App[None]):
         Binding("g", "go_to_time", "↪ Time", show=False),
         Binding("h", "show_history", "◷ History"),
         Binding("p", "show_playlists", "≡ Playlists"),
+        Binding("l", "show_library", "▣ Offline"),
         Binding("s", "add_to_playlist", "Save to playlist", show=False),
         Binding("e", "enqueue_playlist", "Queue playlist", show=False),
+        Binding("k", "toggle_offline_retained", "Keep offline", show=False),
         Binding("a", "enqueue_history", "Add history track", show=False),
         Binding("c", "clear_history", "Clear history", show=False),
         Binding("r", "rename_playlist", "Rename playlist", show=False),
@@ -1033,11 +1104,30 @@ class AuenApp(App[None]):
         height: 1fr;
         background: $surface;
     }
+    DataTable > .datatable--cursor {
+        text-style: none;
+    }
+    DataTable:focus > .datatable--cursor {
+        text-style: none;
+    }
     #playback-status {
         dock: bottom;
-        height: 5;
+        height: 6;
         padding: 0 2;
         background: $panel;
+    }
+    #download-status {
+        width: 1fr;
+        height: 1;
+        border: none;
+        padding: 0;
+        color: $text-muted;
+        background: transparent;
+        text-align: left;
+    }
+    #download-status:hover, #download-status:focus {
+        color: $text;
+        background: $boost;
     }
     #now-playing {
         height: 2;
@@ -1106,6 +1196,13 @@ class AuenApp(App[None]):
         self._named_playlists: list[SavedPlaylist] = []
         self._active_named_playlist: SavedPlaylist | None = None
         self._playlist_return: ResultsViewState | None = None
+        self._showing_library = False
+        self._library_entries: list[CacheEntry] = []
+        self._library_return: ResultsViewState | None = None
+        self._library_filter_query = ""
+        self._library_filter_return_row: int | None = None
+        self._library_filter_return_uri: str | None = None
+        self._search_value_before_library: str | None = None
         self._results_parent: ResultsViewState | None = None
         self._search_restore: ResultsViewState | None = None
         self._active_query: str | None = None
@@ -1132,6 +1229,7 @@ class AuenApp(App[None]):
                 yield TrackTable(id="queue", cursor_type="row")
                 yield Static("", classes="pane-guide", id="queue-guide")
         with Vertical(id="playback-status"):
+            yield Button("▣ Offline", id="download-status", compact=True)
             yield Static("○ Nothing playing", id="now-playing")
             with Horizontal(id="progress-row"):
                 yield ProgressBar(
@@ -1171,6 +1269,7 @@ class AuenApp(App[None]):
         queue.zebra_stripes = True
         self.call_after_refresh(self._sync_table_widths)
         self._refresh_queue()
+        self._refresh_download_status()
         self.set_interval(0.5, self._refresh_playback_status)
         if self.current_session_mode is SessionMode.ASK:
             self.push_screen(SessionModeScreen(), self._session_mode_selected)
@@ -1215,11 +1314,26 @@ class AuenApp(App[None]):
     @on(Input.Submitted, "#search-bar")
     def search_submitted(self, event: Input.Submitted) -> None:
         query = event.value.strip()
+        if self._showing_library:
+            if not self._library_filter_query and query:
+                table = self.query_one("#results", DataTable)
+                selected = self._selected_library_entry()
+                self._library_filter_return_row = max(0, table.cursor_row)
+                self._library_filter_return_uri = (
+                    selected.source_uri if selected is not None else None
+                )
+            if not query:
+                self._restore_unfiltered_library()
+                return
+            self._library_filter_query = query
+            self._show_library()
+            return
         if not query:
             return
         self._search_restore = self._capture_results_state()
         self._history_return = None
         self._playlist_return = None
+        self._library_return = None
         self._results_parent = None
         self._active_query = query
         self._search_limit = self._initial_search_limit()
@@ -1256,6 +1370,11 @@ class AuenApp(App[None]):
 
     @on(TrackTable.QueuePlayNextRequested)
     def queue_play_next_requested(self, event: TrackTable.QueuePlayNextRequested) -> None:
+        if event.table.id == "results" and self._showing_library:
+            track = self._selected_library_track()
+            if track is not None:
+                self._request_history_queue(track, play_now=False, append=False)
+            return
         if event.table.id == "results" and self._showing_history:
             entry = self._selected_history_entry()
             if entry is not None:
@@ -1275,6 +1394,12 @@ class AuenApp(App[None]):
 
     @on(TrackTable.ResultsBackRequested)
     def results_back_requested(self) -> None:
+        if self._showing_library:
+            if self._library_filter_query:
+                self._restore_unfiltered_library()
+                return
+            self._leave_library()
+            return
         if self._showing_history:
             self._leave_history()
             return
@@ -1328,6 +1453,10 @@ class AuenApp(App[None]):
             self._search_loading = False
             if previous_count:
                 self.query_one("#results-title", Label).update(f"⌕ Results · {previous_count}")
+            elif self._search_restore is not None:
+                restore = self._search_restore
+                self._search_restore = None
+                self._restore_results_state(restore)
             else:
                 self._show_search_state("Search failed — press / to try again")
             self.notify(str(exc), title="Search failed", severity="error")
@@ -1371,7 +1500,10 @@ class AuenApp(App[None]):
         self._showing_named_playlists = False
         self._named_playlists = []
         self._active_named_playlist = None
+        self._showing_library = False
+        self._library_entries = []
         table.remove_class("playlist-tracks")
+        table.remove_class("library-view")
         self._title_pages = {
             key: page for key, page in self._title_pages.items() if key[0] != "results"
         }
@@ -1417,7 +1549,10 @@ class AuenApp(App[None]):
         self._showing_named_playlists = False
         self._named_playlists = []
         self._active_named_playlist = None
+        self._showing_library = False
+        self._library_entries = []
         table.remove_class("playlist-tracks")
+        table.remove_class("library-view")
         self._result_order = [entry.track for entry in history]
         self._results_heading = "History"
         self.search_results = {
@@ -1458,6 +1593,7 @@ class AuenApp(App[None]):
         self._configure_results_columns(history=False, status=False)
         table.clear()
         table.remove_class("playlist-tracks")
+        table.remove_class("library-view")
         self._title_pages = {
             key: page for key, page in self._title_pages.items() if key[0] != "results"
         }
@@ -1466,6 +1602,8 @@ class AuenApp(App[None]):
         self._showing_named_playlists = True
         self._named_playlists = named
         self._active_named_playlist = None
+        self._showing_library = False
+        self._library_entries = []
         self._result_order = []
         self._results_heading = "Playlists"
         self.search_results = {}
@@ -1513,6 +1651,7 @@ class AuenApp(App[None]):
         self._configure_results_columns(history=False, status=True)
         table.clear()
         table.add_class("playlist-tracks")
+        table.remove_class("library-view")
         self._title_pages = {
             key: page for key, page in self._title_pages.items() if key[0] != "results"
         }
@@ -1520,6 +1659,8 @@ class AuenApp(App[None]):
         self._history_entries = []
         self._showing_named_playlists = True
         self._active_named_playlist = current
+        self._showing_library = False
+        self._library_entries = []
         self._result_order = []
         self._result_order.extend(items)
         self._results_heading = current.name
@@ -1547,15 +1688,24 @@ class AuenApp(App[None]):
         table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
         self.call_after_refresh(self._update_context_guides)
 
-    def _configure_results_columns(self, *, history: bool, status: bool) -> None:
+    def _configure_results_columns(
+        self,
+        *,
+        history: bool,
+        status: bool,
+        detail_label: str = "Time",
+    ) -> None:
         table = self.query_one("#results", DataTable)
         wanted = 2 + (2 if history else 0) + (1 if status else 0)
-        if len(table.ordered_columns) == wanted:
+        if (
+            len(table.ordered_columns) == wanted
+            and table.ordered_columns[1].label.plain == detail_label
+        ):
             table.set_class(history, "history-view")
             return
         table.clear(columns=True)
         table.add_column("Title", width=10, key="title")
-        table.add_column("Time", width=7, key="time")
+        table.add_column(detail_label, width=8 if detail_label == "Size" else 7, key="time")
         if history:
             table.add_column("Last", width=10, key="last")
             table.add_column("Plays", width=6, key="plays")
@@ -1563,8 +1713,127 @@ class AuenApp(App[None]):
             table.add_column("●", width=1, key="status")
         table.set_class(history, "history-view")
 
+    def _show_library(
+        self,
+        entries: Sequence[CacheEntry] | None = None,
+        *,
+        cursor_row: int = 0,
+        cursor_uri: str | None = None,
+    ) -> None:
+        self._enter_library_search_mode()
+        if entries is None:
+            all_entries = self.session.offline_entries()
+            folded_query = self._library_filter_query.casefold()
+            library = [
+                entry
+                for entry in all_entries
+                if not folded_query or folded_query in entry.title.casefold()
+            ]
+        else:
+            library = list(entries)
+            all_entries = self.session.offline_entries()
+        table = self.query_one("#results", DataTable)
+        self._configure_library_columns(table)
+        table.clear()
+        table.remove_class("playlist-tracks")
+        table.add_class("library-view")
+        self._title_pages = {
+            key: page for key, page in self._title_pages.items() if key[0] != "results"
+        }
+        self._showing_history = False
+        self._history_entries = []
+        self._showing_named_playlists = False
+        self._named_playlists = []
+        self._active_named_playlist = None
+        self._showing_library = True
+        self._library_entries = library
+        tracks = [self._offline_track(entry) for entry in library]
+        self._result_order = cast("list[SearchItem]", tracks)
+        self._results_heading = "Offline"
+        self.search_results = {
+            _result_row_key(track, position): track
+            for position, track in enumerate(tracks)
+        }
+        self._active_query = None
+        self._search_limit = 0
+        self._search_has_more = False
+        title_width = self._table_title_width(table)
+        for position, (entry, track) in enumerate(zip(library, tracks, strict=True)):
+            table.add_row(
+                _title_cell(track.title, title_width, 0)[0],
+                entry.duration_display or "--:--",
+                _format_bytes(entry.size_bytes),
+                "◆" if entry.pinned else "○",
+                key=_result_row_key(track, position),
+            )
+        stats = self.session.cache.stats()
+        total_size = _format_bytes(stats.library_bytes + stats.cache_bytes)
+        count_text = (
+            f"{len(library)}/{len(all_entries)}"
+            if self._library_filter_query
+            else str(len(library))
+        )
+        self.query_one("#results-title", Label).update(
+            f"▣ Offline · {count_text} · {total_size}"
+        )
+        if not library:
+            table.add_row(
+                (
+                    "No matching offline tracks"
+                    if self._library_filter_query
+                    else "No offline media yet — press d on a result"
+                ),
+                "",
+                "",
+                "",
+                key=_STATE_KEY,
+            )
+        elif cursor_uri is not None:
+            cursor_row = next(
+                (
+                    position
+                    for position, entry in enumerate(library)
+                    if entry.source_uri == cursor_uri
+                ),
+                cursor_row,
+            )
+        self._sync_table_width(table)
+        table.focus()
+        table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
+        self.call_after_refresh(self._update_context_guides)
+
+    @staticmethod
+    def _offline_track(entry: CacheEntry) -> Track:
+        return Track(
+            title=entry.title,
+            source=TrackSource.YOUTUBE,
+            uri=entry.source_uri,
+            cached_path=entry.path,
+            duration_seconds=entry.duration_seconds,
+            duration_display=entry.duration_display,
+            track_id=entry.track_id,
+        )
+
+    @staticmethod
+    def _configure_library_columns(table: DataTable[object]) -> None:
+        expected = ["Title", "Time", "Size", "●"]
+        if [column.label.plain for column in table.ordered_columns] == expected:
+            table.remove_class("history-view")
+            return
+        table.clear(columns=True)
+        table.add_column("Title", width=10, key="title")
+        table.add_column("Time", width=8, key="time")
+        table.add_column("Size", width=11, key="size")
+        table.add_column("●", width=2, key="status")
+        table.remove_class("history-view")
+
     @on(DataTable.RowSelected, "#results")
     def result_selected(self, event: DataTable.RowSelected) -> None:
+        if self._showing_library:
+            track = self._selected_library_track()
+            if track is not None:
+                self._request_history_queue(track, play_now=True, append=False)
+            return
         if self._showing_history:
             entry = self._selected_history_entry()
             if entry is not None:
@@ -1671,9 +1940,19 @@ class AuenApp(App[None]):
                 if self._active_named_playlist is not None
                 else None
             ),
+            library_entries=(
+                list(self._library_entries) if self._showing_library else None
+            ),
+            library_filter=(
+                self._library_filter_query if self._showing_library else None
+            ),
         )
 
     def _restore_results_state(self, state: ResultsViewState) -> None:
+        if state.library_entries is not None:
+            self._library_filter_query = state.library_filter or ""
+            self._show_library(state.library_entries, cursor_row=state.cursor_row)
+            return
         if state.history_entries is not None:
             self._show_history(state.history_entries, cursor_row=state.cursor_row)
             return
@@ -1711,7 +1990,10 @@ class AuenApp(App[None]):
         self._showing_named_playlists = False
         self._named_playlists = []
         self._active_named_playlist = None
+        self._showing_library = False
+        self._library_entries = []
         table.remove_class("playlist-tracks")
+        table.remove_class("library-view")
         self._result_order = []
         self.search_results = {}
         self._results_heading = "Results"
@@ -1777,7 +2059,7 @@ class AuenApp(App[None]):
             title="Playing now" if was_playing else "Moved to front",
         )
 
-    def _refresh_queue(self) -> None:
+    def _refresh_queue(self, *, cursor_row: int | None = None) -> None:
         table = self.query_one("#queue", DataTable)
         table.clear()
         self._title_pages = {
@@ -1795,6 +2077,8 @@ class AuenApp(App[None]):
         self.query_one("#queue-title", Label).update(
             f"≡ Queue · {self.session.playlist.queue_length}"
         )
+        if cursor_row is not None and table.row_count:
+            table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
 
     def _availability_symbol(self, track: Track) -> str:
         if track.is_cached:
@@ -1807,8 +2091,8 @@ class AuenApp(App[None]):
             return "↓"
         return "↗"
 
-    def _refresh_visible_availability(self) -> None:
-        self._refresh_queue()
+    def _refresh_visible_availability(self, *, queue_cursor_row: int | None = None) -> None:
+        self._refresh_queue(cursor_row=queue_cursor_row)
         if not (self._showing_history or self._active_named_playlist is not None):
             return
         table = self.query_one("#results", DataTable)
@@ -1829,22 +2113,30 @@ class AuenApp(App[None]):
     def _update_context_guides(self) -> None:
         if not self.query("#results-guide"):
             return
-        if self._active_named_playlist is not None:
+        if self._showing_library:
             results_text = (
-                "Enter play · Home next · a queue · e queue all · s save · "
+                "/ filter · Enter play · Home next · a queue · s playlist · "
+                "k keep/release · Del delete · Esc back"
+            )
+        elif self._active_named_playlist is not None:
+            results_text = (
+                "Enter play · Home next · a queue · d offline · e queue all · s save · "
                 "Shift+↑/↓ move · Del remove · Esc back"
             )
         elif self._showing_named_playlists:
             results_text = "Enter open · c create · r rename · Del delete · Esc back"
         elif self._showing_history:
             results_text = (
-                "Enter play · Home next · a queue · s save · Del remove · c clear · Esc back"
+                "Enter play · Home next · a queue · d offline · s save · "
+                "Del remove · c clear · Esc back"
             )
         else:
-            results_text = "Enter queue/open · s save · ←/→ title · h history · p playlists"
+            results_text = (
+                "Enter queue/open · d offline · s save · ←/→ title · h history · p playlists"
+            )
         self.query_one("#results-guide", Static).update(results_text)
         self.query_one("#queue-guide", Static).update(
-            "Enter play · Home next · s save · Shift+↑/↓ move · Del remove"
+            "Enter play · Home next · d offline · s save · Shift+↑/↓ move · Del remove"
         )
         results = self.query_one("#results", DataTable)
         queue = self.query_one("#queue", DataTable)
@@ -1889,6 +2181,8 @@ class AuenApp(App[None]):
         if table.id == "results":
             if self._showing_history:
                 reserved = 28
+            elif self._showing_library:
+                reserved = 24
             elif self._active_named_playlist is not None:
                 reserved = 11
             else:
@@ -1995,16 +2289,38 @@ class AuenApp(App[None]):
             return
         if not self.is_running:
             return
-        if exception is None:
-            self.call_from_thread(self._refresh_visible_availability)
-            self.call_from_thread(self.notify, "Media is available offline", title="Download")
+        if threading.current_thread() is threading.main_thread():
+            self._handle_download_finished(exception)
         else:
-            self.call_from_thread(
-                self.notify,
+            self.call_from_thread(self._handle_download_finished, exception)
+
+    def _handle_download_finished(self, exception: BaseException | None) -> None:
+        if exception is None:
+            self._refresh_after_download()
+            self.notify("Media is available offline", title="Download")
+        else:
+            self._refresh_download_status()
+            self.notify(
                 str(exception),
                 title="Download failed",
                 severity="error",
             )
+
+    def _refresh_after_download(self) -> None:
+        queue = self.query_one("#queue", DataTable)
+        queue_had_focus = queue.has_focus
+        queue_cursor_row = queue.cursor_row
+        self._refresh_visible_availability(queue_cursor_row=queue_cursor_row)
+        if self._showing_library:
+            cursor_row = self.query_one("#results", DataTable).cursor_row
+            selected = self._selected_library_entry()
+            self._show_library(
+                cursor_row=max(0, cursor_row),
+                cursor_uri=selected.source_uri if selected is not None else None,
+            )
+        if queue_had_focus:
+            queue.focus()
+        self._refresh_download_status()
 
     def _session_mode_selected(self, mode: SessionMode | None) -> None:
         if mode is not None:
@@ -2043,7 +2359,11 @@ class AuenApp(App[None]):
             self._show_history(cursor_row=max(0, cursor_row))
 
     def _show_now_playing(self, track: Track | None) -> None:
-        message = "○ Nothing playing" if track is None else f"▶ {track.title}"
+        message = (
+            "○ Nothing playing"
+            if track is None
+            else f"▶ {_terminal_safe_title(track.title)}"
+        )
         self.query_one("#now-playing", Static).update(message)
         if track is None:
             self._reset_progress()
@@ -2053,6 +2373,7 @@ class AuenApp(App[None]):
         # screen during shutdown. Avoid querying widgets after that point.
         if not self.query("#playback-time"):
             return
+        self._refresh_download_status()
         player = self.session.player
         track = self.session.current_track
         if player is None or track is None:
@@ -2065,8 +2386,19 @@ class AuenApp(App[None]):
 
         elapsed = max(0.0, status.elapsed_seconds)
         state_symbol = "Ⅱ" if status.state is PlaybackState.PAUSED else "▶"
-        self.query_one("#now-playing", Static).update(f"{state_symbol} {track.title}")
-        duration = track.duration_seconds
+        self.query_one("#now-playing", Static).update(
+            f"{state_symbol} {_terminal_safe_title(track.title)}"
+        )
+        duration = track.duration_seconds or status.duration_seconds
+        if track.duration_seconds is None and duration is not None and duration > 0:
+            track.duration_seconds = duration
+            track.duration_display = _format_timestamp(duration)
+            if track.cached_path is not None:
+                self.session.cache.update_duration(
+                    track.uri,
+                    duration,
+                    track.duration_display,
+                )
         total = max(1.0, duration or 1.0)
         self.query_one("#playback-progress", ProgressBar).update(
             total=total,
@@ -2080,6 +2412,29 @@ class AuenApp(App[None]):
         if abs(elapsed - self._last_saved_position) >= 5.0:
             self.session.save()
             self._last_saved_position = elapsed
+
+    def _refresh_download_status(self) -> None:
+        if not self.query("#download-status"):
+            return
+        active = self.session.downloads.active_count
+        cooldown = self.session.youtube_requests.remaining_seconds
+        stats = self.session.cache.stats()
+        total = stats.cache_bytes + stats.library_bytes
+        if cooldown:
+            label = (
+                f"⚠ YouTube retry in {_format_timestamp(cooldown)} · "
+                f"▣ {stats.library_tracks} kept + {stats.cached_tracks} cached · "
+                f"{_format_bytes(total)}"
+            )
+        elif active:
+            offline_count = stats.library_tracks + stats.cached_tracks
+            label = f"↓ Downloading {active} · ▣ {offline_count} offline"
+        else:
+            label = (
+                f"▣ {stats.library_tracks} kept + {stats.cached_tracks} cached · "
+                f"{_format_bytes(total)}"
+            )
+        self.query_one("#download-status", Button).label = label
 
     def _reset_progress(self) -> None:
         self.query_one("#playback-progress", ProgressBar).update(total=1, progress=0)
@@ -2103,6 +2458,8 @@ class AuenApp(App[None]):
             self._leave_history()
             return
         self._history_return = self._capture_results_state()
+        if self._showing_library:
+            self._leave_library_search_mode()
         self._search_generation += 1
         self._search_loading = False
         self._show_history()
@@ -2110,6 +2467,63 @@ class AuenApp(App[None]):
             "Enter play now · Home play next · a add · Del remove · c clear · Esc back",
             title="Recently played",
         )
+
+    def action_show_library(self) -> None:
+        if self._showing_library:
+            self._leave_library()
+            return
+        self._library_return = self._capture_results_state()
+        self._library_filter_query = ""
+        self._library_filter_return_row = None
+        self._library_filter_return_uri = None
+        self._search_generation += 1
+        self._search_loading = False
+        self._show_library()
+        self.notify(
+            "Enter play · Home next · a queue · k keep/release · Del delete · Esc back",
+            title="Offline media",
+        )
+
+    @on(Button.Pressed, "#download-status")
+    def download_status_pressed(self) -> None:
+        self.action_show_library()
+
+    def _leave_library(self) -> None:
+        state = self._library_return
+        self._library_return = None
+        self._leave_library_search_mode()
+        self._library_filter_query = ""
+        self._library_filter_return_row = None
+        self._library_filter_return_uri = None
+        if state is None:
+            self._show_results([])
+            return
+        self._restore_results_state(state)
+
+    def _restore_unfiltered_library(self) -> None:
+        cursor_row = self._library_filter_return_row
+        cursor_uri = self._library_filter_return_uri
+        if cursor_row is None:
+            cursor_row = max(0, self.query_one("#results", DataTable).cursor_row)
+        self._library_filter_query = ""
+        self.query_one("#search-bar", Input).value = ""
+        self._show_library(cursor_row=cursor_row, cursor_uri=cursor_uri)
+        self._library_filter_return_row = None
+        self._library_filter_return_uri = None
+
+    def _enter_library_search_mode(self) -> None:
+        search = self.query_one("#search-bar", Input)
+        if self._search_value_before_library is None:
+            self._search_value_before_library = search.value
+            search.value = self._library_filter_query
+        search.placeholder = "Filter offline media — no network used…"
+
+    def _leave_library_search_mode(self) -> None:
+        search = self.query_one("#search-bar", Input)
+        if self._search_value_before_library is not None:
+            search.value = self._search_value_before_library
+            self._search_value_before_library = None
+        search.placeholder = "Search YouTube or paste a YouTube URL…"
 
     def action_show_playlists(self) -> None:
         if self._showing_named_playlists:
@@ -2121,6 +2535,8 @@ class AuenApp(App[None]):
                 self._leave_playlists()
             return
         self._playlist_return = self._capture_results_state()
+        if self._showing_library:
+            self._leave_library_search_mode()
         self._search_generation += 1
         self._search_loading = False
         self._show_named_playlists()
@@ -2263,6 +2679,8 @@ class AuenApp(App[None]):
     def _selected_track_for_playlist(self) -> Track | None:
         results = self.query_one("#results", DataTable)
         if results.has_focus:
+            if self._showing_library:
+                return self._selected_library_track()
             if self._showing_history:
                 entry = self._selected_history_entry()
                 return entry.track if entry is not None else None
@@ -2292,11 +2710,23 @@ class AuenApp(App[None]):
         item = self._result_order[row]
         return item if isinstance(item, Track) else None
 
+    def _selected_library_entry(self) -> CacheEntry | None:
+        row = self.query_one("#results", DataTable).cursor_row
+        if not 0 <= row < len(self._library_entries):
+            return None
+        return self._library_entries[row]
+
+    def _selected_library_track(self) -> Track | None:
+        entry = self._selected_library_entry()
+        return self._offline_track(entry) if entry is not None else None
+
     def action_enqueue_history(self) -> None:
         if not self.query_one("#results", DataTable).has_focus:
             return
         track: Track | None = None
-        if self._showing_history:
+        if self._showing_library:
+            track = self._selected_library_track()
+        elif self._showing_history:
             entry = self._selected_history_entry()
             track = entry.track if entry is not None else None
         elif self._active_named_playlist is not None:
@@ -2373,6 +2803,11 @@ class AuenApp(App[None]):
         self.notify(name.strip(), title="Playlist renamed")
 
     def action_leave_search(self) -> None:
+        if self._showing_library:
+            search = self.query_one("#search-bar", Input)
+            search.value = self._library_filter_query
+            self.query_one("#results", DataTable).focus()
+            return
         if self._search_loading:
             self._search_generation += 1
             self._search_loading = False
@@ -2506,20 +2941,50 @@ class AuenApp(App[None]):
             self.notify(str(exc), title="Seek unavailable", severity="warning")
 
     def action_download_selected(self) -> None:
-        table = self.query_one("#results", DataTable)
-        if not 0 <= table.cursor_row < len(self._result_order):
+        results = self.query_one("#results", DataTable)
+        queue = self.query_one("#queue", DataTable)
+        if queue.has_focus:
+            queued = self.session.playlist.queue_list
+            if not 0 <= queue.cursor_row < len(queued):
+                return
+            track = queued[queue.cursor_row]
+        elif results.has_focus:
+            if not 0 <= results.cursor_row < len(self._result_order):
+                return
+            item = self._result_order[results.cursor_row]
+            if isinstance(item, MediaCollection):
+                self.notify("Open the collection and select a track", title="Save offline")
+                return
+            track = item
+        else:
             return
-        item = self._result_order[table.cursor_row]
-        if isinstance(item, MediaCollection):
-            self.notify("Open the collection and select a track", title="Save offline")
-            return
-        track = item
         future = self.session.save_offline(track)
+        if future.done():
+            exception = future.exception()
+            if exception is None:
+                self._refresh_after_download()
+                self.notify(track.title, title="Already available offline")
+            else:
+                self._handle_download_finished(exception)
+            return
         future.add_done_callback(self._download_finished)
+        self._refresh_download_status()
         self.notify(track.title, title="Saving offline")
 
     def action_remove_queued(self) -> None:
         results = self.query_one("#results", DataTable)
+        if self._showing_library and results.has_focus:
+            library_entry = self._selected_library_entry()
+            if library_entry is None:
+                return
+            cursor_row = results.cursor_row
+            self.push_screen(
+                DeleteOfflineScreen(library_entry),
+                lambda confirmed: self._delete_offline_decided(
+                    library_entry, cursor_row, confirmed
+                ),
+            )
+            return
         if self._showing_named_playlists and results.has_focus:
             if self._active_named_playlist is None:
                 playlist = self._selected_named_playlist()
@@ -2545,13 +3010,13 @@ class AuenApp(App[None]):
                 self.notify(removed.title, title="Removed from playlist")
             return
         if self._showing_history and results.has_focus:
-            entry = self._selected_history_entry()
-            if entry is None:
+            history_entry = self._selected_history_entry()
+            if history_entry is None:
                 return
             cursor_row = results.cursor_row
-            if self.session.remove_recent_history(entry.track.uri):
+            if self.session.remove_recent_history(history_entry.track.uri):
                 self._show_history(cursor_row=max(0, cursor_row))
-                self.notify(entry.track.title, title="Removed from history")
+                self.notify(history_entry.track.title, title="Removed from history")
             return
         table = self.query_one("#queue", DataTable)
         cursor_row = table.cursor_row
@@ -2559,6 +3024,50 @@ class AuenApp(App[None]):
             self._refresh_queue()
             if table.row_count:
                 table.move_cursor(row=min(cursor_row, table.row_count - 1))
+
+    def _delete_offline_decided(
+        self,
+        entry: CacheEntry,
+        cursor_row: int,
+        confirmed: bool | None,
+    ) -> None:
+        if not confirmed:
+            return
+        if self.session.remove_offline(entry.source_uri):
+            self._show_library(cursor_row=max(0, cursor_row))
+            self.notify(entry.title, title="Offline media deleted")
+
+    def action_toggle_offline_retained(self) -> None:
+        if not self._showing_library:
+            return
+        entry = self._selected_library_entry()
+        if entry is None:
+            return
+        retained = not entry.pinned
+        try:
+            updated = self.session.set_offline_retained(
+                entry.source_uri,
+                retained=retained,
+            )
+        except KeyError:
+            self.notify("Offline media no longer exists", title="Library changed")
+            self._show_library()
+            return
+        cursor_row = self.query_one("#results", DataTable).cursor_row
+        self._show_library(
+            cursor_row=max(0, cursor_row),
+            cursor_uri=entry.source_uri if retained else None,
+        )
+        if updated is None:
+            self.notify(
+                "Released media exceeded the cache limit and was removed",
+                title=entry.title,
+            )
+        else:
+            self.notify(
+                "Retained permanently" if retained else "Released to bounded cache",
+                title=entry.title,
+            )
 
     def _delete_named_playlist_decided(
         self,
@@ -2628,6 +3137,20 @@ def _format_timestamp(seconds: float | None) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def _format_bytes(size_bytes: int) -> str:
+    """Format managed media sizes compactly for narrow terminals."""
+    size = max(0, size_bytes)
+    if size < 1024:
+        return f"{size} B"
+    value = size / 1024
+    if value < 1024:
+        return f"{value:.1f} KiB"
+    value /= 1024
+    if value < 1024:
+        return f"{value:.1f} MiB"
+    return f"{value / 1024:.1f} GiB"
+
+
 def _history_time(value: datetime) -> str:
     """Format a history timestamp compactly in the terminal's local timezone."""
     local = value.astimezone()
@@ -2656,7 +3179,7 @@ def _title_window(value: str, width: int, page: int) -> tuple[str, int]:
 
 def _title_cell(value: str, width: int, page: int) -> tuple[str, int]:
     """Render a title with a terminal-safe, emoji-aware right gutter."""
-    value = _stabilize_terminal_emoji(value)
+    value = _terminal_safe_title(_stabilize_terminal_emoji(value))
     rendered, selected = _title_window(
         value,
         max(1, width - _emoji_safety_gutter(value)),
@@ -2665,6 +3188,15 @@ def _title_cell(value: str, width: int, page: int) -> tuple[str, int]:
     return (
         rendered if _is_termux_environment() else _isolate_ltr(rendered),
         selected,
+    )
+
+
+def _terminal_safe_title(value: str) -> str:
+    """Transliterate Indic runs whose shaped width varies between terminals."""
+    return re.sub(
+        r"[\u0900-\u0dff]+",
+        lambda match: anyascii(match.group(0)).lower(),
+        value,
     )
 
 
@@ -2679,14 +3211,17 @@ def _stabilize_terminal_emoji(value: str) -> str:
 
 
 def _emoji_safety_gutter(value: str) -> int:
-    """Allow for terminals disagreeing with Unicode's emoji cell widths."""
+    """Allow for terminals disagreeing with emoji and combining-mark widths."""
     emoji_codepoints = sum(
         1
         for character in value
         if "\U0001f000" <= character <= "\U0001faff"
         or "\u2600" <= character <= "\u27bf"
     )
-    return 2 + min(6, emoji_codepoints)
+    combining_marks = sum(
+        1 for character in value if unicodedata.category(character).startswith("M")
+    )
+    return 2 + min(6, emoji_codepoints) + min(4, combining_marks)
 
 
 def _result_id(item: SearchItem) -> str:

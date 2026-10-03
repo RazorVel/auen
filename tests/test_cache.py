@@ -1,5 +1,6 @@
 """Tests for bounded cache and offline-library behavior."""
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,8 @@ def test_destination_is_stable_and_sanitized(tmp_path: Path) -> None:
 
 def test_register_and_lookup_sets_cached_track_path(tmp_path: Path) -> None:
     track = make_track("saved")
+    track.duration_seconds = 183.0
+    track.duration_display = "3:03"
     with CacheManager(tmp_path, max_cache_bytes=100) as cache:
         destination = cache.destination_for(track)
         write_media(destination, 10)
@@ -44,6 +47,50 @@ def test_register_and_lookup_sets_cached_track_path(tmp_path: Path) -> None:
     assert entry.size_bytes == 10
     assert restored is not None
     assert restored.path == destination
+    assert restored.duration_seconds == 183.0
+    assert restored.duration_display == "3:03"
+
+
+def test_updates_duration_discovered_during_playback(tmp_path: Path) -> None:
+    track = make_track("duration-later")
+    with CacheManager(tmp_path) as cache:
+        destination = cache.destination_for(track)
+        write_media(destination, 10)
+        cache.register(track, destination)
+
+        assert cache.update_duration(track.uri, 3723.0, "1:02:03") is True
+        restored = cache.get(track.uri, touch=False)
+
+    assert restored is not None
+    assert restored.duration_seconds == 3723.0
+    assert restored.duration_display == "1:02:03"
+
+
+def test_existing_cache_database_is_migrated_for_duration(tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    database = tmp_path / "cache.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE media (
+                source_uri TEXT PRIMARY KEY,
+                track_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                size_bytes INTEGER NOT NULL,
+                last_access_ns INTEGER NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+    with CacheManager(tmp_path) as cache:
+        columns = {
+            row[1]
+            for row in cache._connection.execute("PRAGMA table_info(media)").fetchall()
+        }
+
+    assert {"duration_seconds", "duration_display"} <= columns
 
 
 def test_prune_evicts_least_recent_unpinned_file(tmp_path: Path) -> None:

@@ -6,10 +6,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from yt_dlp.utils import DownloadError
 
 from auen.cache import CacheManager
 from auen.downloads import DownloadManager, DownloadServiceError
 from auen.models import Track, TrackSource
+from auen.youtube_policy import YouTubeRequestGate
 
 
 def make_track(title: str) -> Track:
@@ -162,3 +164,25 @@ def test_download_prefers_android_compatible_audio(tmp_path: Path) -> None:
     options = youtube_dl.call_args.args[0]
     assert options["format"].startswith("bestaudio[ext=m4a]/")
     assert downloaded.suffix == ".m4a"
+
+
+def test_download_block_starts_shared_cooldown(tmp_path: Path) -> None:
+    track = make_track("blocked")
+    gate = YouTubeRequestGate(minimum_interval_seconds=0, cooldown_seconds=120)
+    extractor = MagicMock()
+    extractor.extract_info.side_effect = DownloadError(
+        "ERROR: HTTP Error 429: Too Many Requests"
+    )
+
+    with (
+        CacheManager(tmp_path / "cache") as cache,
+        DownloadManager(cache, request_gate=gate) as downloads,
+        patch("auen.downloads.YoutubeDL") as youtube_dl,
+    ):
+        youtube_dl.return_value.__enter__.return_value = extractor
+        with pytest.raises(DownloadServiceError, match="temporarily blocked"):
+            downloads._download_file(track, tmp_path)
+        with pytest.raises(DownloadServiceError, match="cooling down"):
+            downloads._download_file(track, tmp_path)
+
+    assert extractor.extract_info.call_count == 1

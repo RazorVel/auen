@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "auen"
-version = "0.3.0"
+version = "0.4.0"
 description = "A terminal audio player with YouTube search, streaming, and caching"
 readme = "README.md"
 license = "MIT"
@@ -23,6 +23,7 @@ dependencies = [
     "textual>=8.2,<9",
     "yt-dlp>=2024.0.0",
     "platformdirs>=4.0.0",
+    "anyascii>=0.3,<1",
     "tomli>=2.0.1; python_version < '3.11'",
 ]
 

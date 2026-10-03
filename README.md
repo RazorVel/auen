@@ -4,9 +4,9 @@
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Development status — v0.3.0:** v0.2.0 is the current tagged prototype. Core playback,
-> responsive rendering, History, and shutdown behavior have been exercised with `mpv` on
-> Linux and a physical Termux device. v0.3.0 adds durable named playlists.
+> **Release — v0.4.0:** Core playback, responsive rendering, History, named playlists,
+> Offline media, anonymous-request cooldown, and shutdown behavior have been exercised with
+> `mpv` on Linux and a physical Termux device.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
@@ -14,7 +14,7 @@ size-limited persistent playback cache.
 
 ![auen in a narrow terminal](docs/assets/auen-narrow.svg)
 
-## What works in the v0.3.0 development branch
+## What works in v0.4.0
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
@@ -30,18 +30,25 @@ size-limited persistent playback cache.
   Queue in saved order.
 - See streaming, downloading, and offline availability directly in Queue, History, and an
   opened named playlist.
+- Open Offline media with `l`; filter locally without a network connection, inspect duration
+  and size, play or queue cached tracks, retain or release automatic cache entries, delete
+  managed media safely, and inspect cache usage and download activity.
+- Pace anonymous YouTube operations across search, streaming, and downloads. A bot challenge
+  or HTTP 429 starts a short fail-fast cooldown shown in the Offline strip, while cached and
+  local playback remain available.
 - Get compact, view-specific key guidance at the bottom of the focused Results or Queue pane.
 - Preview and save themes, with an adaptive side-by-side or stacked phone-width layout.
 - Configure behavior through the TUI or scriptable `auen config` commands.
 
-This is intentionally an early prototype. Offline-library management, `:` command mode,
-and local directory import are planned for later versions. Some YouTube videos may require
-account cookies and cannot yet be played.
+This is intentionally an early prototype. `:` command mode and local directory import are
+planned for later versions. auen deliberately does not use Google-account cookies; videos
+or networks that require authenticated YouTube access may therefore be unavailable. Request
+pacing can reduce bursts, but it cannot bypass a YouTube IP or account challenge.
 
 ## Requirements
 
 - Python 3.10 or newer
-- Linux with `mpv`, or Android with Termux and Termux:API
+- Linux with `mpv`, or Android with Termux and its `mpv` package
 - Network access for YouTube search and streaming
 
 `pipx` is recommended on Linux because it keeps auen and its Python dependencies in an
@@ -59,7 +66,7 @@ pipx ensurepath
 Install the tagged prototype directly from GitHub:
 
 ```console
-pipx install 'git+https://github.com/razorvel/auen.git@v0.2.0'
+pipx install 'git+https://github.com/razorvel/auen.git@v0.4.0'
 auen doctor
 auen
 ```
@@ -77,21 +84,18 @@ auen
 
 ## Prepare Termux for testing
 
-Install both [Termux](https://github.com/termux/termux-app#installation) and the
-[Termux:API companion app](https://github.com/termux/termux-api) from the same source so
-their signatures are compatible. Then, inside Termux:
+Install [Termux](https://github.com/termux/termux-app#installation), then run:
 
 ```console
 pkg update
-pkg install python git termux-api mpv
-python -m pip install 'git+https://github.com/razorvel/auen.git@v0.2.0'
+pkg install python git mpv ffmpeg
+python -m pip install 'git+https://github.com/razorvel/auen.git@v0.4.0'
 auen doctor
 auen
 ```
 
-When installed, mpv is selected automatically and provides seeking, direct streaming,
-volume control, and precise position reporting. Termux:API remains the fallback backend,
-but its media-player interface does not provide seeking.
+mpv is selected automatically and provides seeking, direct streaming, volume control, and
+precise position reporting. Termux:API is not required when mpv is installed.
 
 The real-device test sequence and expected limitations are recorded in
 [`docs/termux-testing.md`](docs/termux-testing.md).
@@ -110,6 +114,7 @@ The real-device test sequence and expected limitations are recorded in
 | `n` | Play next track |
 | `h` | Open or leave Recently Played |
 | `p` | Open or leave named Playlists |
+| `l` | Open or leave Offline media |
 | `s` | Save the selected track to a named playlist |
 | `e` | Append every track in the currently open named playlist to Queue |
 | `d` | Retain the selected result for offline playback |
@@ -132,9 +137,21 @@ track, and Escape returns to the playlist list.
 Availability symbols are consistent across Queue, Recently Played, and opened playlists:
 `✓` is available offline, `↓` is downloading, and `↗` will stream.
 
+In Offline media, `◆` is explicitly retained and `○` is an automatic cache entry eligible
+for size-based eviction. `/` focuses a title filter that works entirely from the local cache.
+Enter plays now, Home plays next, `a` appends to Queue, `s` saves to a named playlist, `k`
+switches between retained and bounded cache, Delete removes the managed media file after
+confirmation, and Escape restores the prior Results view. Older cached entries show an
+unknown duration until first playback; mpv then discovers and saves it locally.
+
 Left and Right page through a long selected title. Leaving that row restores its title to
 the beginning. Playback seeking deliberately uses `[` and `]`, so arrow keys remain safe
 for tables and text fields.
+
+Some terminals disagree with Textual about the rendered width of shaped Indic scripts,
+which can corrupt adjacent columns. auen transliterates only those script runs in table and
+Now Playing display text; the original Unicode title remains unchanged in searches, saved
+state, playlists, and playback metadata.
 
 ## Settings from the terminal
 

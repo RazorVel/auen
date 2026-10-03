@@ -13,6 +13,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Select
 from auen.app import (
     AuenApp,
     ClearHistoryScreen,
+    DeleteOfflineScreen,
     DeletePlaylistScreen,
     DuplicateQueueScreen,
     LoadMoreScreen,
@@ -24,11 +25,13 @@ from auen.app import (
     SettingsScreen,
     ThemeScreen,
     _emoji_safety_gutter,
+    _format_bytes,
     _format_timestamp,
     _is_termux_environment,
     _merge_search_items,
     _parse_timestamp,
     _stabilize_terminal_emoji,
+    _terminal_safe_title,
     _title_cell,
     _title_window,
     run,
@@ -213,7 +216,8 @@ def test_title_cell_keeps_a_gutter_for_terminal_emoji_widths(emoji: str) -> None
     title = f"A long title {emoji} that reaches the edge"
     rendered, _page = _title_cell(title, 20, 0)
 
-    assert cell_len(rendered) <= 20 - _emoji_safety_gutter(title)
+    stabilized = _stabilize_terminal_emoji(title)
+    assert cell_len(rendered) <= 20 - _emoji_safety_gutter(stabilized)
 
 
 def test_load_more_merge_preserves_order_and_deduplicates_uris() -> None:
@@ -852,6 +856,32 @@ async def test_escape_cancels_ui_search_and_ignores_late_result(tmp_path: Path) 
         release.set()
 
 
+async def test_failed_search_restores_previous_results(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    previous = Track(
+        title="Previous result",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=previous-failure",
+    )
+
+    def failed_search(_query: str, *, limit: int) -> list[Track]:
+        del limit
+        raise RuntimeError("YouTube anonymous access is cooling down")
+
+    app.session.youtube.search = failed_search  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app._show_results([previous])
+        search_input = app.query_one("#search-bar", Input)
+        search_input.value = "blocked query"
+        search_input.focus()
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+
+        assert app._result_order == [previous]
+        assert app.query_one("#results", DataTable).row_count == 1
+
+
 async def test_empty_search_has_visible_state_and_focuses_queue(tmp_path: Path) -> None:
     app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
     app.session.youtube.search = lambda *_args, **_kwargs: []  # type: ignore[method-assign]
@@ -894,6 +924,65 @@ async def test_queue_supports_play_next_reorder_and_play_now(tmp_path: Path) -> 
         assert app.session.playlist.queue_list[0] is tracks[1]
         assert queue.get_cell(f"{tracks[1].track_id}:0", "time") == "-"
         assert queue.get_cell(f"{tracks[1].track_id}:0", "status") == "↗"
+
+
+async def test_download_action_uses_track_from_focused_pane(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    result = Track(
+        title="Result track",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=result-download",
+    )
+    queued = Track(
+        title="Queued track",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=queue-download",
+    )
+    pending = MagicMock()
+    pending.done.return_value = False
+    app.session.save_offline = MagicMock(return_value=pending)  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app._show_results([result])
+        app.session.playlist.add(queued)
+        app._refresh_queue()
+        queue = app.query_one("#queue", DataTable)
+        queue.focus()
+
+        await pilot.press("d")
+        app.session.save_offline.assert_called_once_with(queued)  # type: ignore[attr-defined]
+
+        app.session.save_offline.reset_mock()  # type: ignore[attr-defined]
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("d")
+        app.session.save_offline.assert_called_once_with(result)  # type: ignore[attr-defined]
+
+
+async def test_download_completion_preserves_queue_cursor(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    tracks = [
+        Track(
+            title=f"Queued {index}",
+            source=TrackSource.YOUTUBE,
+            uri=f"https://youtube.com/watch?v=cursor-{index}",
+        )
+        for index in range(4)
+    ]
+
+    async with app.run_test() as pilot:
+        app.session.playlist.add_many(tracks)
+        app._refresh_queue()
+        queue = app.query_one("#queue", DataTable)
+        queue.focus()
+        queue.move_cursor(row=2)
+        await pilot.pause()
+
+        app._refresh_after_download()
+        await pilot.pause()
+
+        assert queue.has_focus
+        assert queue.cursor_row == 2
+        assert app.session.playlist.queue_list[queue.cursor_row] is tracks[2]
 
 
 async def test_queue_deletion_keeps_nearest_row_selected(tmp_path: Path) -> None:
@@ -1389,3 +1478,236 @@ async def test_playlist_deletion_keeps_nearest_row_selected(tmp_path: Path) -> N
         await pilot.press("delete")
         assert table.cursor_row == 0
         assert app._selected_named_playlist_track() == tracks[0]
+
+
+def _register_offline_track(
+    app: AuenApp,
+    track: Track,
+    *,
+    pinned: bool,
+    content: bytes = b"offline audio",
+) -> None:
+    path = app.session.cache.destination_for(track)
+    path.write_bytes(content)
+    app.session.cache.register(track, path, pinned=pinned)
+
+
+async def test_offline_library_restores_results_and_manages_retention(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    prior = [
+        Track(title=f"Result {index}", source=TrackSource.LOCAL, uri=f"/result-{index}")
+        for index in range(3)
+    ]
+    kept = Track(
+        title="Kept offline",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=kept-offline",
+    )
+    cached = Track(
+        title="Automatic cache",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=automatic-cache",
+        duration_seconds=125.0,
+        duration_display="2:05",
+    )
+    _register_offline_track(app, kept, pinned=True)
+    _register_offline_track(app, cached, pinned=False)
+
+    async with app.run_test() as pilot:
+        app._show_results(prior, cursor_row=2)
+        await pilot.press("l")
+        table = app.query_one("#results", DataTable)
+
+        assert "Offline · 2" in str(app.query_one("#results-title", Label).render())
+        assert [column.label.plain for column in table.ordered_columns] == [
+            "Title",
+            "Time",
+            "Size",
+            "●",
+        ]
+        assert table.get_cell(f"{cached.track_id}:1", "time") == "2:05"
+        assert table.get_cell(f"{kept.track_id}:0", "status") == "◆"
+        assert table.get_cell(f"{cached.track_id}:1", "status") == "○"
+        assert "k keep/release" in str(app.query_one("#results-guide").render())
+
+        table.move_cursor(row=1)
+        await pilot.press("k")
+        assert app.session.cache.get(cached.uri, touch=False).pinned  # type: ignore[union-attr]
+        selected = app._selected_library_entry()
+        assert selected is not None
+        assert selected.source_uri == cached.uri
+        assert table.get_cell(
+            f"{cached.track_id}:{table.cursor_row}", "status"
+        ) == "◆"
+
+        promoted_row = table.cursor_row
+        await pilot.press("k")
+        assert app.session.cache.get(cached.uri, touch=False) is not None
+        assert not app.session.cache.get(cached.uri, touch=False).pinned  # type: ignore[union-attr]
+        assert table.cursor_row == promoted_row
+
+        await pilot.press("escape")
+        assert app._result_order == prior
+        assert table.cursor_row == 2
+
+
+async def test_table_cursor_does_not_use_bold_text(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test():
+        table = app.query_one("#results", DataTable)
+        table.focus()
+
+        assert table.get_component_rich_style("datatable--cursor").bold is not True
+
+
+async def test_offline_library_queue_actions_and_safe_deletion(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    tracks = [
+        Track(
+            title=f"Offline {index}",
+            source=TrackSource.YOUTUBE,
+            uri=f"https://youtube.com/watch?v=offline-{index}",
+        )
+        for index in range(3)
+    ]
+    for track in tracks:
+        _register_offline_track(app, track, pinned=True)
+
+    async with app.run_test() as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("l")
+        table = app.query_one("#results", DataTable)
+
+        table.move_cursor(row=1)
+        await pilot.press("a")
+        assert app.session.playlist.queue_list == [app._offline_track(app._library_entries[1])]
+
+        table.move_cursor(row=2)
+        await pilot.press("home")
+        assert app.session.playlist.queue_list[0].uri == tracks[2].uri
+
+        table.move_cursor(row=0)
+        await pilot.press("enter")
+        assert app.session.playlist.queue_list[0].uri == tracks[0].uri
+
+        table.move_cursor(row=1)
+        selected = app._library_entries[1]
+        await pilot.press("delete")
+        assert isinstance(app.screen, DeleteOfflineScreen)
+        await pilot.press("escape")
+        assert app.session.cache.get(selected.source_uri, touch=False) is not None
+
+        await pilot.press("delete")
+        await pilot.click("#confirm-delete-offline")
+        assert app.session.cache.get(selected.source_uri, touch=False) is None
+        assert table.cursor_row == 1
+
+
+async def test_offline_status_button_opens_library_and_search_accepts_l(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(
+        title="Offline",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=status-button",
+    )
+    _register_offline_track(app, track, pinned=True, content=b"123456")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = app.query_one("#download-status", Button)
+        assert "1 kept + 0 cached" in str(status.label)
+        assert _format_bytes(6) in str(status.label)
+
+        app.session.youtube_requests.block()
+        app._refresh_download_status()
+        assert "YouTube retry in" in str(status.label)
+        assert "1 kept + 0 cached" in str(status.label)
+
+        await pilot.click("#download-status")
+        assert app._showing_library
+
+        await pilot.press("escape", "/", "l")
+        assert app.query_one("#search-bar", Input).value == "l"
+
+
+async def test_offline_search_filters_locally_and_restores_search_text(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    app.session.submit_search = MagicMock()  # type: ignore[method-assign]
+    for title in ("Alpha offline", "Beta offline", "Alphabet song"):
+        _register_offline_track(
+            app,
+            Track(
+                title=title,
+                source=TrackSource.YOUTUBE,
+                uri=f"https://youtube.com/watch?v={title}",
+            ),
+            pinned=True,
+        )
+
+    async with app.run_test() as pilot:
+        search = app.query_one("#search-bar", Input)
+        search.value = "previous youtube query"
+        table = app.query_one("#results", DataTable)
+        table.focus()
+        await pilot.press("l")
+        table.move_cursor(row=2)
+        await pilot.press("/", "ctrl+a")
+        await pilot.press(*"beta")
+        await pilot.press("enter")
+
+        assert app._showing_library
+        assert [entry.title for entry in app._library_entries] == ["Beta offline"]
+        assert "1/3" in str(app.query_one("#results-title", Label).render())
+        app.session.submit_search.assert_not_called()  # type: ignore[attr-defined]
+
+        await pilot.press("escape")
+        assert [entry.title for entry in app._library_entries] == [
+            "Alpha offline",
+            "Alphabet song",
+            "Beta offline",
+        ]
+        selected = app._selected_library_entry()
+        assert selected is not None
+        assert selected.title == "Beta offline"
+
+        await pilot.press("escape")
+        assert search.value == "previous youtube query"
+
+
+def test_title_cell_reserves_extra_space_for_combining_scripts() -> None:
+    title = "Salim की Request पर Shreya ने गाया"
+
+    safe_title = _terminal_safe_title(title)
+    assert safe_title == "Salim ki Request pr Shreya ne gaya"
+    assert not any("\u0900" <= character <= "\u0dff" for character in safe_title)
+    rendered, _page = _title_cell(title, 24, 0)
+    assert cell_len(rendered) <= 24 - _emoji_safety_gutter(safe_title)
+
+
+def test_terminal_safe_title_leaves_other_scripts_unchanged() -> None:
+    title = "Arabic أغنية · Japanese やさしい · emoji 🔥"
+
+    assert _terminal_safe_title(title) == title
+
+
+async def test_save_offline_promotes_existing_cache_without_callback_crash(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(
+        title="Promote me",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=promote-cache",
+    )
+    _register_offline_track(app, track, pinned=False)
+
+    async with app.run_test() as pilot:
+        app._show_results([track])
+        await pilot.press("d")
+
+        entry = app.session.cache.get(track.uri, touch=False)
+        assert entry is not None
+        assert entry.pinned

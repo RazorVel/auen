@@ -103,4 +103,5 @@ class PlaybackStatus:
     state: PlaybackState
     track: Track | None = None
     elapsed_seconds: float = 0.0
+    duration_seconds: float | None = None
     volume: int = 80

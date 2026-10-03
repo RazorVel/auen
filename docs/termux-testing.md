@@ -1,26 +1,20 @@
 # Termux validation checklist
 
-Version 0.1.1 contains Termux rendering fixes and two Android-capable backends. Basic
-playback has been exercised on a physical Android device, but the release is not considered
-fully validated until this checklist passes.
+Version 0.4.0 has been exercised with the Termux `mpv` package on a physical Android device.
+Use this checklist for release and regression validation.
 
 ## Before launching
 
-1. Install Termux and the Termux:API companion app from the same distribution source.
-2. In Termux, run `pkg update` and `pkg install python git termux-api mpv`.
+1. Install a current Termux release.
+2. In Termux, run `pkg update` and `pkg install python git mpv ffmpeg`.
 3. Install auen, then run `auen doctor`.
-4. Confirm the doctor reports mpv and the yt-dlp Python package as available. The
-   Termux:API checks should also pass when that fallback is installed.
-
-If the companion does not respond, open Android's app settings and confirm that Termux
-and Termux:API are both installed, allowed to run, and came from compatible sources.
+4. Confirm the doctor reports mpv and the yt-dlp Python package as available.
 
 ## Playback and recovery
 
 1. Launch `auen` and choose **Stream only**. With `backend = "auto"`, mpv should be
    selected when it is installed.
-2. Search, queue a track, and start it. mpv should accept the direct stream. The
-   Termux:API fallback instead waits for a temporary local file.
+2. Search, queue a track, and start it. mpv should accept the direct stream.
 3. Pause and resume with Space. Confirm the progress display continues to update.
 4. Press `[` and `]`, then use `g`, and confirm seeking works when mpv is selected.
 5. Press `n` with several queued tracks and confirm the next track starts without a
@@ -37,8 +31,11 @@ and Termux:API are both installed, allowed to run, and came from compatible sour
 4. At the narrowest practical width, confirm Time, status, progress, and playback controls
    remain visible and aligned.
 5. Search for Arabic, Devanagari, and emoji-heavy titles and confirm no text crosses pane
-   boundaries.
+   boundaries. Indic runs are transliterated in display text for stable terminal widths.
+6. Open Offline with `l`, filter locally with `/`, and confirm cached playback works without
+   network access.
+7. If YouTube returns a bot challenge or HTTP 429, confirm the retry countdown appears and
+   Offline playback remains available.
 
-Record the Android version, Termux source/version, Termux:API version, terminal dimensions,
-and any traceback when reporting a failure. Termux regressions discovered after v0.1.1
-should be fixed in another v0.1.x hotfix before new feature work resumes.
+Record the Android version, Termux version, terminal dimensions, and any traceback when
+reporting a failure.

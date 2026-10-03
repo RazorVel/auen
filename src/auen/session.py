@@ -21,6 +21,7 @@ from auen.models import (
 from auen.player import PlaybackController
 from auen.playlist import Playlist
 from auen.state import SessionSnapshot, StateStore
+from auen.youtube_policy import YouTubeRequestGate
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,6 +42,7 @@ class AuenSession:
         cache: CacheManager | None = None,
         downloads: DownloadManager | None = None,
         youtube: YouTubeService | None = None,
+        request_gate: YouTubeRequestGate | None = None,
     ) -> None:
         self.config = config
         self.state = state or StateStore(config.state_dir / "state.sqlite3")
@@ -49,11 +51,13 @@ class AuenSession:
             config.cache_dir,
             max_cache_bytes=config.cache_max_bytes,
         )
+        self.youtube_requests = request_gate or YouTubeRequestGate()
         self.downloads = downloads or DownloadManager(
             self.cache,
             max_workers=config.max_download_threads,
+            request_gate=self.youtube_requests,
         )
-        self.youtube = youtube or YouTubeService()
+        self.youtube = youtube or YouTubeService(request_gate=self.youtube_requests)
         self._search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="auen-search")
         self._auto_cache_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="auen-auto-cache"
@@ -226,6 +230,15 @@ class AuenSession:
 
     def save_offline(self, track: Track) -> Future[CacheEntry]:
         return self.downloads.submit(track, pinned=True)
+
+    def offline_entries(self) -> list[CacheEntry]:
+        return self.cache.list_entries()
+
+    def set_offline_retained(self, source_uri: str, *, retained: bool) -> CacheEntry | None:
+        return self.cache.set_pinned(source_uri, pinned=retained)
+
+    def remove_offline(self, source_uri: str) -> bool:
+        return self.cache.remove(source_uri)
 
     def remove_queued(self, index: int) -> Track | None:
         removed = self.playlist.remove(index)

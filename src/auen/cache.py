@@ -41,6 +41,8 @@ class CacheEntry:
     size_bytes: int
     last_access_ns: int
     pinned: bool
+    duration_seconds: float | None = None
+    duration_display: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,12 +84,22 @@ class CacheManager:
                     path TEXT NOT NULL UNIQUE,
                     size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
                     last_access_ns INTEGER NOT NULL,
-                    pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))
+                    pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+                    duration_seconds REAL,
+                    duration_display TEXT
                 );
                 CREATE INDEX IF NOT EXISTS media_lru
                     ON media(pinned, last_access_ns);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in self._connection.execute("PRAGMA table_info(media)").fetchall()
+            }
+            if "duration_seconds" not in columns:
+                self._connection.execute("ALTER TABLE media ADD COLUMN duration_seconds REAL")
+            if "duration_display" not in columns:
+                self._connection.execute("ALTER TABLE media ADD COLUMN duration_display TEXT")
 
     def destination_for(self, track: Track, *, extension: str = ".opus") -> Path:
         """Return a stable, safe destination owned by this cache."""
@@ -109,15 +121,18 @@ class CacheManager:
             self._connection.execute(
                 """
                 INSERT INTO media(
-                    source_uri, track_id, title, path, size_bytes, last_access_ns, pinned
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    source_uri, track_id, title, path, size_bytes, last_access_ns, pinned,
+                    duration_seconds, duration_display
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_uri) DO UPDATE SET
                     track_id = excluded.track_id,
                     title = excluded.title,
                     path = excluded.path,
                     size_bytes = excluded.size_bytes,
                     last_access_ns = excluded.last_access_ns,
-                    pinned = MAX(media.pinned, excluded.pinned)
+                    pinned = MAX(media.pinned, excluded.pinned),
+                    duration_seconds = COALESCE(excluded.duration_seconds, media.duration_seconds),
+                    duration_display = COALESCE(excluded.duration_display, media.duration_display)
                 """,
                 (
                     track.uri,
@@ -127,6 +142,8 @@ class CacheManager:
                     size,
                     accessed,
                     int(pinned),
+                    track.duration_seconds,
+                    track.duration_display,
                 ),
             )
         track.cached_path = managed_path
@@ -184,6 +201,25 @@ class CacheManager:
         with self._connection:
             self._connection.execute("DELETE FROM media WHERE source_uri = ?", (source_uri,))
         return True
+
+    @_locked
+    def update_duration(
+        self,
+        source_uri: str,
+        duration_seconds: float,
+        duration_display: str,
+    ) -> bool:
+        """Persist duration discovered locally during playback."""
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE media
+                SET duration_seconds = ?, duration_display = ?
+                WHERE source_uri = ?
+                """,
+                (duration_seconds, duration_display, source_uri),
+            )
+        return cursor.rowcount > 0
 
     @_locked
     def prune(self) -> list[Path]:
@@ -283,4 +319,14 @@ def _entry_from_row(row: sqlite3.Row | dict[str, object]) -> CacheEntry:
         size_bytes=int(str(row["size_bytes"])),
         last_access_ns=int(str(row["last_access_ns"])),
         pinned=bool(row["pinned"]),
+        duration_seconds=(
+            float(str(row["duration_seconds"]))
+            if row["duration_seconds"] is not None
+            else None
+        ),
+        duration_display=(
+            str(row["duration_display"])
+            if row["duration_display"] is not None
+            else None
+        ),
     )

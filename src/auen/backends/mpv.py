@@ -160,6 +160,10 @@ class MpvBackend(AudioBackend):
         time_resp = self._send_command(["get_property", "time-pos"])
         elapsed = float(time_resp.get("data", 0.0) or 0.0)
 
+        duration_resp = self._send_command(["get_property", "duration"])
+        duration_data = duration_resp.get("data")
+        duration = float(duration_data) if duration_data is not None else None
+
         # Get volume
         vol_resp = self._send_command(["get_property", "volume"])
         vol_data = vol_resp.get("data")
@@ -169,6 +173,7 @@ class MpvBackend(AudioBackend):
         return PlaybackStatus(
             state=state,
             elapsed_seconds=elapsed,
+            duration_seconds=duration,
             volume=vol,
         )
 

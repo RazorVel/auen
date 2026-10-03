@@ -120,6 +120,26 @@ def test_skip_advances_to_next_track() -> None:
     player.close()
 
 
+def test_play_next_insertion_continues_with_existing_queue() -> None:
+    playlist = Playlist()
+    backend = FakeBackend()
+    current = make_track("current")
+    queued = make_track("already-queued")
+    library = make_track("from-library")
+    playlist.add_many([current, queued])
+    player = PlaybackController(playlist, backend)
+    player.start()
+
+    wait_until(lambda: backend.played == [current.uri])
+    playlist.add_next(library)
+    player.skip()
+    wait_until(lambda: backend.played == [current.uri, library.uri])
+    backend.ended.set()
+    wait_until(lambda: backend.played == [current.uri, library.uri, queued.uri])
+
+    player.close()
+
+
 def test_repeat_one_requeues_completed_track() -> None:
     playlist = Playlist()
     playlist.repeat_mode = RepeatMode.ONE

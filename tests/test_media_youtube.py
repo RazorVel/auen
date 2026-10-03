@@ -5,8 +5,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from yt_dlp.utils import DownloadError
 
-from auen.media.youtube import YouTubeService, YouTubeServiceError, is_youtube_url
+from auen.media.youtube import (
+    YouTubeService,
+    YouTubeServiceError,
+    is_temporary_youtube_block,
+    is_youtube_url,
+    youtube_error_message,
+)
 from auen.models import CollectionKind, MediaCollection, Track, TrackSource
+from auen.youtube_policy import YouTubeRequestGate
 
 
 def test_youtube_url_validation() -> None:
@@ -181,7 +188,12 @@ def test_resolve_requires_playable_stream() -> None:
 
 
 def test_bot_challenge_has_concise_actionable_error() -> None:
-    service = YouTubeService()
+    service = YouTubeService(
+        request_gate=YouTubeRequestGate(
+            minimum_interval_seconds=0,
+            cooldown_seconds=120,
+        )
+    )
     extractor = MagicMock()
     extractor.extract_info.side_effect = DownloadError(
         "ERROR: [youtube] abc: Sign in to confirm you\u2019re not a bot. Use --cookies."
@@ -189,9 +201,31 @@ def test_bot_challenge_has_concise_actionable_error() -> None:
 
     with (
         patch("auen.media.youtube.YoutubeDL") as youtube_dl,
-        pytest.raises(YouTubeServiceError, match="requires sign-in") as raised,
+        pytest.raises(YouTubeServiceError, match="temporarily blocked") as raised,
     ):
         youtube_dl.return_value.__enter__.return_value = extractor
         service.search("blocked")
 
     assert "ERROR:" not in str(raised.value)
+    assert service.request_gate.remaining_seconds > 0
+
+    with pytest.raises(YouTubeServiceError, match="cooling down"):
+        service.search("blocked again")
+    assert extractor.extract_info.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "ERROR: HTTP Error 429: Too Many Requests",
+        "ERROR: Sign in to confirm you're not a bot",
+    ],
+)
+def test_temporary_block_detection(message: str) -> None:
+    assert is_temporary_youtube_block(message)
+
+
+def test_generic_youtube_error_removes_terminal_escape_sequences() -> None:
+    assert youtube_error_message("\x1b[0;31mERROR:\x1b[0m unavailable") == (
+        "ERROR: unavailable"
+    )

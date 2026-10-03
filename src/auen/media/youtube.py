@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import quote_plus, urlparse
 
@@ -9,6 +10,7 @@ from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
 from yt_dlp.utils import DownloadError  # type: ignore[import-untyped]
 
 from auen.models import CollectionKind, MediaCollection, SearchItem, Track, TrackSource
+from auen.youtube_policy import YouTubeCooldownError, YouTubeRequestGate
 
 _YOUTUBE_HOSTS = {"youtube.com", "youtu.be"}
 
@@ -19,6 +21,9 @@ class YouTubeServiceError(RuntimeError):
 
 class YouTubeService:
     """Search YouTube and resolve selected results without downloading media."""
+
+    def __init__(self, *, request_gate: YouTubeRequestGate | None = None) -> None:
+        self.request_gate = request_gate or YouTubeRequestGate()
 
     def search(self, query: str, *, limit: int = 5) -> list[SearchItem]:
         query = query.strip()
@@ -97,10 +102,16 @@ class YouTubeService:
         if limit is not None:
             options["playlistend"] = limit
         try:
+            self.request_gate.wait_turn()
             with YoutubeDL(options) as ydl:
                 result = ydl.extract_info(target, download=False)
+        except YouTubeCooldownError as exc:
+            raise YouTubeServiceError(str(exc)) from exc
         except DownloadError as exc:
-            raise YouTubeServiceError(_user_facing_error(exc)) from exc
+            if is_temporary_youtube_block(exc):
+                remaining = self.request_gate.block()
+                raise YouTubeServiceError(youtube_blocked_message(remaining)) from exc
+            raise YouTubeServiceError(youtube_error_message(exc)) from exc
         if not isinstance(result, dict):
             raise YouTubeServiceError("YouTube returned an invalid response")
         return result
@@ -187,14 +198,29 @@ def _format_duration(seconds: float | None) -> str | None:
     return f"{minutes}:{secs:02d}"
 
 
-def _user_facing_error(error: DownloadError) -> str:
-    message = str(error)
-    if (
-        "Sign in to confirm you\u2019re not a bot" in message
-        or "Sign in to confirm you're not a bot" in message
-    ):
-        return (
-            "YouTube requires sign-in for this video. Try another result for now; "
-            "browser-cookie support is not configured yet."
+def is_temporary_youtube_block(error: BaseException | str) -> bool:
+    """Return whether yt-dlp reported an anonymous-access or rate-limit block."""
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "sign in to confirm you\u2019re not a bot",
+            "sign in to confirm you're not a bot",
+            "http error 429",
+            "too many requests",
         )
-    return message
+    )
+
+
+def youtube_error_message(error: BaseException | str) -> str:
+    """Remove terminal escape sequences from an otherwise useful yt-dlp error."""
+    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(error)).strip()
+
+
+def youtube_blocked_message(remaining: int) -> str:
+    minutes, seconds = divmod(max(0, remaining), 60)
+    wait = f"{minutes}:{seconds:02d}" if minutes else f"{seconds}s"
+    return (
+        "YouTube temporarily blocked anonymous access. "
+        f"auen paused new YouTube requests for {wait}; use Offline media or try later."
+    )

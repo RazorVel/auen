@@ -7,6 +7,7 @@ import pytest
 from auen.backends import detect_backend
 from auen.backends.mpv import MpvBackend
 from auen.backends.termux import TermuxBackend
+from auen.models import PlaybackState
 
 
 @patch("subprocess.Popen")
@@ -85,6 +86,27 @@ def test_mpv_stop_kills_process() -> None:
     mock_proc.terminate.assert_called_once()
     assert backend._is_playing is False
     assert backend._end_event.is_set() is True
+
+
+def test_mpv_status_reports_duration() -> None:
+    backend = MpvBackend()
+    backend._process = MagicMock()
+    backend._process.poll.return_value = None
+    backend._send_command = MagicMock(  # type: ignore[method-assign]
+        side_effect=[
+            {"data": False},
+            {"data": 12.5},
+            {"data": 245.0},
+            {"data": 73},
+        ]
+    )
+
+    status = backend.get_status()
+
+    assert status.state is PlaybackState.PLAYING
+    assert status.elapsed_seconds == 12.5
+    assert status.duration_seconds == 245.0
+    assert status.volume == 73
 
 
 @patch("shutil.which")
