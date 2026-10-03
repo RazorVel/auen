@@ -41,6 +41,7 @@ from auen.models import (
     MediaCollection,
     PlaybackState,
     RepeatMode,
+    SavedPlaylist,
     SearchItem,
     SessionMode,
     Track,
@@ -112,19 +113,23 @@ class TrackTable(DataTable[object]):
         self.post_message(self.ViewportResized(self))
 
     def action_priority_up(self) -> None:
-        if self.id == "queue":
+        if self.id == "queue" or self.has_class("playlist-tracks"):
             self.post_message(self.QueueMoveRequested(self, -1))
         else:
             self.action_cursor_up()
 
     def action_priority_down(self) -> None:
-        if self.id == "queue":
+        if self.id == "queue" or self.has_class("playlist-tracks"):
             self.post_message(self.QueueMoveRequested(self, 1))
         else:
             self.action_cursor_down()
 
     def action_scroll_home(self) -> None:
-        if self.id == "queue" or self.has_class("history-view"):
+        if (
+            self.id == "queue"
+            or self.has_class("history-view")
+            or self.has_class("playlist-tracks")
+        ):
             self.post_message(self.QueuePlayNextRequested(self))
         else:
             super().action_scroll_home()
@@ -142,6 +147,9 @@ class ResultsViewState:
     limit: int
     has_more: bool
     history_entries: list[HistoryEntry] | None
+    playlists: list[SavedPlaylist] | None
+    active_playlist: SavedPlaylist | None
+    playlist_tracks: list[Track] | None
 
 
 class SessionModeScreen(ModalScreen[SessionMode]):
@@ -220,14 +228,17 @@ class DuplicateQueueScreen(ModalScreen[bool]):
     }
     """
 
-    def __init__(self, track: Track) -> None:
+    def __init__(self, track: Track, *, destination: str = "queue") -> None:
         super().__init__()
         self.track = track
+        self.destination = destination
 
     def compose(self) -> ComposeResult:
         with Vertical(id="duplicate-dialog"):
-            yield Label("Already in queue", classes="dialog-title")
-            yield Static(f"“{self.track.title}” is already queued. Add it again?")
+            yield Label(f"Already in {self.destination}", classes="dialog-title")
+            yield Static(
+                f'“{self.track.title}” is already in {self.destination}. Add it again?'
+            )
             with Horizontal(id="duplicate-actions"):
                 yield Button("Cancel", id="cancel-duplicate", variant="default")
                 yield Button("Add again", id="confirm-duplicate", variant="warning")
@@ -353,6 +364,267 @@ class ClearHistoryScreen(ModalScreen[bool]):
         self.dismiss(False)
 
     @on(Button.Pressed, "#confirm-clear-history")
+    def confirm_pressed(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class PlaylistNameScreen(ModalScreen[str | None]):
+    """Create or rename a durable playlist."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    PlaylistNameScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #playlist-name-dialog {
+        width: 58;
+        height: auto;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #playlist-name-input {
+        margin-top: 1;
+    }
+    #playlist-name-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #playlist-name-actions Button {
+        margin-left: 1;
+    }
+    PlaylistNameScreen.termux-safe #playlist-name-dialog {
+        border: ascii $accent;
+    }
+    """
+
+    def __init__(self, title: str, action_label: str, *, initial_name: str = "") -> None:
+        super().__init__()
+        self.dialog_title = title
+        self.action_label = action_label
+        self.initial_name = initial_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="playlist-name-dialog"):
+            yield Label(self.dialog_title, classes="dialog-title")
+            yield Input(
+                value=self.initial_name,
+                placeholder="Playlist name",
+                id="playlist-name-input",
+                max_length=80,
+            )
+            with Horizontal(id="playlist-name-actions"):
+                yield Button("Cancel", id="cancel-playlist-name")
+                yield Button(
+                    self.action_label,
+                    id="confirm-playlist-name",
+                    variant="primary",
+                )
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
+        field = self.query_one("#playlist-name-input", Input)
+        field.focus()
+        if self.initial_name:
+            field.action_select_all()
+
+    def _submit(self) -> None:
+        value = self.query_one("#playlist-name-input", Input).value
+        if not value.strip():
+            self.notify("Enter a playlist name", title="Name required", severity="warning")
+            return
+        self.dismiss(value)
+
+    @on(Input.Submitted, "#playlist-name-input")
+    def name_submitted(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#confirm-playlist-name")
+    def confirm_pressed(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel-playlist-name")
+    def cancel_pressed(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class PlaylistPickerScreen(ModalScreen[int | None]):
+    """Choose which named playlist receives a selected track."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    PlaylistPickerScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #playlist-picker-dialog {
+        width: 60;
+        height: 70%;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #playlist-picker-list {
+        height: 1fr;
+        margin-top: 1;
+    }
+    PlaylistPickerScreen.termux-safe #playlist-picker-dialog {
+        border: ascii $accent;
+    }
+    PlaylistPickerScreen.termux-safe #playlist-picker-list {
+        border: none;
+    }
+    """
+
+    def __init__(self, playlists: list[SavedPlaylist]) -> None:
+        super().__init__()
+        self.playlists = playlists
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="playlist-picker-dialog"):
+            yield Label("Add to playlist", classes="dialog-title")
+            yield Static("Select a destination · Esc cancel")
+            yield OptionList(
+                *(f"{playlist.name} · {playlist.track_count}" for playlist in self.playlists),
+                id="playlist-picker-list",
+            )
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
+        self.query_one("#playlist-picker-list", OptionList).focus()
+
+    @on(OptionList.OptionSelected, "#playlist-picker-list")
+    def playlist_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self.playlists[event.option_index].playlist_id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class DeletePlaylistScreen(ModalScreen[bool]):
+    """Confirm deletion of one named playlist."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    DeletePlaylistScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #delete-playlist-dialog {
+        width: 58;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+    #delete-playlist-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #delete-playlist-actions Button {
+        margin-left: 1;
+    }
+    DeletePlaylistScreen.termux-safe #delete-playlist-dialog {
+        border: ascii $warning;
+    }
+    """
+
+    def __init__(self, playlist: SavedPlaylist) -> None:
+        super().__init__()
+        self.playlist = playlist
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-playlist-dialog"):
+            yield Label("Delete playlist?", classes="dialog-title")
+            yield Static(
+                f'Delete "{self.playlist.name}" and its {self.playlist.track_count} tracks?'
+            )
+            with Horizontal(id="delete-playlist-actions"):
+                yield Button("Cancel", id="cancel-delete-playlist")
+                yield Button("Delete", id="confirm-delete-playlist", variant="warning")
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
+        self.query_one("#cancel-delete-playlist", Button).focus()
+
+    @on(Button.Pressed, "#cancel-delete-playlist")
+    def cancel_pressed(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-delete-playlist")
+    def confirm_pressed(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class QueuePlaylistScreen(ModalScreen[bool]):
+    """Confirm appending every track in a named playlist to Queue."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    QueuePlaylistScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #queue-playlist-dialog {
+        width: 58;
+        height: auto;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #queue-playlist-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #queue-playlist-actions Button {
+        margin-left: 1;
+    }
+    QueuePlaylistScreen.termux-safe #queue-playlist-dialog {
+        border: ascii $accent;
+    }
+    """
+
+    def __init__(self, playlist: SavedPlaylist) -> None:
+        super().__init__()
+        self.playlist = playlist
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="queue-playlist-dialog"):
+            yield Label("Queue entire playlist?", classes="dialog-title")
+            yield Static(
+                f'Append all {self.playlist.track_count} tracks from '
+                f'"{self.playlist.name}" in their saved order?'
+            )
+            with Horizontal(id="queue-playlist-actions"):
+                yield Button("Cancel", id="cancel-queue-playlist")
+                yield Button("Queue all", id="confirm-queue-playlist", variant="primary")
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
+        self.query_one("#cancel-queue-playlist", Button).focus()
+
+    @on(Button.Pressed, "#cancel-queue-playlist")
+    def cancel_pressed(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-queue-playlist")
     def confirm_pressed(self) -> None:
         self.dismiss(True)
 
@@ -534,6 +806,12 @@ class SettingsScreen(Screen[bool]):
         align-horizontal: right;
         background: $panel;
     }
+    #settings-guide {
+        height: 1;
+        padding: 0 2;
+        color: $text-muted;
+        background: $panel;
+    }
     #settings-actions Button {
         margin-left: 1;
     }
@@ -603,6 +881,10 @@ class SettingsScreen(Screen[bool]):
             yield from self._switch_row(
                 "Scan folders recursively", "scan-recursive", self.config.scan_recursive
             )
+        yield Static(
+            "Tab/Shift+Tab navigate · Ctrl+S save · Esc cancel",
+            id="settings-guide",
+        )
         with Horizontal(id="settings-actions"):
             yield Button("Cancel", id="cancel")
             yield Button("Save", id="save", variant="primary")
@@ -684,8 +966,12 @@ class AuenApp(App[None]):
         Binding("]", "seek_forward", "10s →", show=False),
         Binding("g", "go_to_time", "↪ Time", show=False),
         Binding("h", "show_history", "◷ History"),
+        Binding("p", "show_playlists", "≡ Playlists"),
+        Binding("s", "add_to_playlist", "Save to playlist", show=False),
+        Binding("e", "enqueue_playlist", "Queue playlist", show=False),
         Binding("a", "enqueue_history", "Add history track", show=False),
         Binding("c", "clear_history", "Clear history", show=False),
+        Binding("r", "rename_playlist", "Rename playlist", show=False),
         Binding("d", "download_selected", "↓ Offline"),
         Binding("delete", "remove_queued", "Del Remove"),
         Binding("f2", "settings", "⚙ Settings"),
@@ -734,6 +1020,14 @@ class AuenApp(App[None]):
         text-style: bold;
         margin-bottom: 1;
         color: $accent;
+    }
+    .pane-guide {
+        display: none;
+        height: 1;
+        color: $text-muted;
+    }
+    .pane.guide-visible .pane-guide {
+        display: block;
     }
     DataTable {
         height: 1fr;
@@ -808,6 +1102,10 @@ class AuenApp(App[None]):
         self._showing_history = False
         self._history_entries: list[HistoryEntry] = []
         self._history_return: ResultsViewState | None = None
+        self._showing_named_playlists = False
+        self._named_playlists: list[SavedPlaylist] = []
+        self._active_named_playlist: SavedPlaylist | None = None
+        self._playlist_return: ResultsViewState | None = None
         self._results_parent: ResultsViewState | None = None
         self._search_restore: ResultsViewState | None = None
         self._active_query: str | None = None
@@ -828,9 +1126,11 @@ class AuenApp(App[None]):
             with Vertical(classes="pane", id="results-pane"):
                 yield Label("⌕ Results · 0", classes="pane-title", id="results-title")
                 yield TrackTable(id="results", cursor_type="row")
+                yield Static("", classes="pane-guide", id="results-guide")
             with Vertical(classes="pane", id="queue-pane"):
                 yield Label("≡ Queue · 0", classes="pane-title", id="queue-title")
                 yield TrackTable(id="queue", cursor_type="row")
+                yield Static("", classes="pane-guide", id="queue-guide")
         with Vertical(id="playback-status"):
             yield Static("○ Nothing playing", id="now-playing")
             with Horizontal(id="progress-row"):
@@ -860,7 +1160,7 @@ class AuenApp(App[None]):
         self._apply_responsive_layout(self.size.width)
         results = self.query_one("#results", DataTable)
         results.cell_padding = 0
-        self._configure_results_columns(history=False)
+        self._configure_results_columns(history=False, status=False)
         results.zebra_stripes = True
         queue = self.query_one("#queue", DataTable)
         queue.cell_padding = 0
@@ -878,6 +1178,7 @@ class AuenApp(App[None]):
             self._start_player()
         if self.backend_error is not None:
             self.notify(self.backend_error, title="Playback unavailable", severity="warning")
+        self.call_after_refresh(self._update_context_guides)
 
     def on_resize(self, event: events.Resize) -> None:
         self._apply_responsive_layout(event.size.width)
@@ -918,6 +1219,7 @@ class AuenApp(App[None]):
             return
         self._search_restore = self._capture_results_state()
         self._history_return = None
+        self._playlist_return = None
         self._results_parent = None
         self._active_query = query
         self._search_limit = self._initial_search_limit()
@@ -936,6 +1238,16 @@ class AuenApp(App[None]):
 
     @on(TrackTable.QueueMoveRequested)
     def queue_move_requested(self, event: TrackTable.QueueMoveRequested) -> None:
+        if event.table.id == "results" and self._active_named_playlist is not None:
+            new_row = self.session.move_named_playlist_track(
+                self._active_named_playlist.playlist_id,
+                event.table.cursor_row,
+                event.delta,
+            )
+            if new_row is None:
+                return
+            self._show_named_playlist_tracks(self._active_named_playlist, cursor_row=new_row)
+            return
         new_row = self.session.move_queued(event.table.cursor_row, event.delta)
         if new_row is None:
             return
@@ -949,6 +1261,11 @@ class AuenApp(App[None]):
             if entry is not None:
                 self._request_history_queue(entry.track, play_now=False, append=False)
             return
+        if event.table.id == "results" and self._active_named_playlist is not None:
+            track = self._selected_named_playlist_track()
+            if track is not None:
+                self._request_history_queue(track, play_now=False, append=False)
+            return
         track = self.session.prioritize_queued(event.table.cursor_row)
         if track is None:
             return
@@ -960,6 +1277,13 @@ class AuenApp(App[None]):
     def results_back_requested(self) -> None:
         if self._showing_history:
             self._leave_history()
+            return
+        if self._showing_named_playlists:
+            if self._active_named_playlist is not None:
+                playlist_id = self._active_named_playlist.playlist_id
+                self._show_named_playlists(cursor_playlist_id=playlist_id)
+            else:
+                self._leave_playlists()
             return
         if self._results_parent is None:
             return
@@ -973,6 +1297,11 @@ class AuenApp(App[None]):
     def reset_title_after_table_blur(self, event: events.DescendantBlur) -> None:
         if isinstance(event.widget, TrackTable):
             self._reset_title_pages(event.widget)
+        self.call_after_refresh(self._update_context_guides)
+
+    @on(events.DescendantFocus)
+    def show_guide_for_focused_pane(self, _event: events.DescendantFocus) -> None:
+        self.call_after_refresh(self._update_context_guides)
 
     @on(DataTable.RowHighlighted)
     def reset_title_after_row_change(self, event: DataTable.RowHighlighted) -> None:
@@ -1035,10 +1364,14 @@ class AuenApp(App[None]):
         cursor_row: int = 0,
     ) -> None:
         table = self.query_one("#results", DataTable)
-        self._configure_results_columns(history=False)
+        self._configure_results_columns(history=False, status=False)
         table.clear()
         self._showing_history = False
         self._history_entries = []
+        self._showing_named_playlists = False
+        self._named_playlists = []
+        self._active_named_playlist = None
+        table.remove_class("playlist-tracks")
         self._title_pages = {
             key: page for key, page in self._title_pages.items() if key[0] != "results"
         }
@@ -1064,6 +1397,7 @@ class AuenApp(App[None]):
         else:
             table.focus()
             table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
+        self.call_after_refresh(self._update_context_guides)
 
     def _show_history(
         self,
@@ -1073,13 +1407,17 @@ class AuenApp(App[None]):
     ) -> None:
         history = list(self.session.recent_history() if entries is None else entries)
         table = self.query_one("#results", DataTable)
-        self._configure_results_columns(history=True)
+        self._configure_results_columns(history=True, status=True)
         table.clear()
         self._title_pages = {
             key: page for key, page in self._title_pages.items() if key[0] != "results"
         }
         self._showing_history = True
         self._history_entries = history
+        self._showing_named_playlists = False
+        self._named_playlists = []
+        self._active_named_playlist = None
+        table.remove_class("playlist-tracks")
         self._result_order = [entry.track for entry in history]
         self._results_heading = "History"
         self.search_results = {
@@ -1096,19 +1434,122 @@ class AuenApp(App[None]):
                 entry.track.duration_display or "-",
                 _history_time(entry.last_played_at),
                 str(entry.play_count),
+                self._availability_symbol(entry.track),
                 key=_result_row_key(entry.track, position),
             )
         self.query_one("#results-title", Label).update(f"◷ History · {len(history)}")
         if not history:
-            table.add_row("No recently played tracks", "", "", "", key=_STATE_KEY)
+            table.add_row("No recently played tracks", "", "", "", "", key=_STATE_KEY)
         table.add_class("history-view")
         self._sync_table_width(table)
         table.focus()
         table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
+        self.call_after_refresh(self._update_context_guides)
 
-    def _configure_results_columns(self, *, history: bool) -> None:
+    def _show_named_playlists(
+        self,
+        playlists: Sequence[SavedPlaylist] | None = None,
+        *,
+        cursor_row: int = 0,
+        cursor_playlist_id: int | None = None,
+    ) -> None:
+        named = list(self.session.named_playlists() if playlists is None else playlists)
         table = self.query_one("#results", DataTable)
-        wanted = 4 if history else 2
+        self._configure_results_columns(history=False, status=False)
+        table.clear()
+        table.remove_class("playlist-tracks")
+        self._title_pages = {
+            key: page for key, page in self._title_pages.items() if key[0] != "results"
+        }
+        self._showing_history = False
+        self._history_entries = []
+        self._showing_named_playlists = True
+        self._named_playlists = named
+        self._active_named_playlist = None
+        self._result_order = []
+        self._results_heading = "Playlists"
+        self.search_results = {}
+        self._active_query = None
+        self._search_limit = 0
+        self._search_has_more = False
+        title_width = self._table_title_width(table)
+        for playlist in named:
+            table.add_row(
+                _title_cell(f"≡ {playlist.name}", title_width, 0)[0],
+                f"{playlist.track_count} trk",
+                key=f"playlist:{playlist.playlist_id}",
+            )
+        self.query_one("#results-title", Label).update(f"≡ Playlists · {len(named)}")
+        if not named:
+            table.add_row("No named playlists — press c to create one", "", key=_STATE_KEY)
+        elif cursor_playlist_id is not None:
+            cursor_row = next(
+                (
+                    position
+                    for position, playlist in enumerate(named)
+                    if playlist.playlist_id == cursor_playlist_id
+                ),
+                cursor_row,
+            )
+        self._sync_table_width(table)
+        table.focus()
+        table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
+        self.call_after_refresh(self._update_context_guides)
+
+    def _show_named_playlist_tracks(
+        self,
+        playlist: SavedPlaylist,
+        tracks: Sequence[Track] | None = None,
+        *,
+        cursor_row: int = 0,
+    ) -> None:
+        items = list(
+            self.session.named_playlist_tracks(playlist.playlist_id)
+            if tracks is None
+            else tracks
+        )
+        current = SavedPlaylist(playlist.playlist_id, playlist.name, len(items))
+        table = self.query_one("#results", DataTable)
+        self._configure_results_columns(history=False, status=True)
+        table.clear()
+        table.add_class("playlist-tracks")
+        self._title_pages = {
+            key: page for key, page in self._title_pages.items() if key[0] != "results"
+        }
+        self._showing_history = False
+        self._history_entries = []
+        self._showing_named_playlists = True
+        self._active_named_playlist = current
+        self._result_order = []
+        self._result_order.extend(items)
+        self._results_heading = current.name
+        self.search_results = {
+            _result_row_key(track, position): track for position, track in enumerate(items)
+        }
+        self._active_query = None
+        self._search_limit = 0
+        self._search_has_more = False
+        title_width = self._table_title_width(table)
+        for position, track in enumerate(items):
+            table.add_row(
+                _title_cell(track.title, title_width, 0)[0],
+                track.duration_display or "-",
+                self._availability_symbol(track),
+                key=_result_row_key(track, position),
+            )
+        self.query_one("#results-title", Label).update(
+            f"≡ {current.name} · {len(items)}"
+        )
+        if not items:
+            table.add_row("Playlist is empty — use s on a track", "", "", key=_STATE_KEY)
+        self._sync_table_width(table)
+        table.focus()
+        table.move_cursor(row=min(max(0, cursor_row), table.row_count - 1))
+        self.call_after_refresh(self._update_context_guides)
+
+    def _configure_results_columns(self, *, history: bool, status: bool) -> None:
+        table = self.query_one("#results", DataTable)
+        wanted = 2 + (2 if history else 0) + (1 if status else 0)
         if len(table.ordered_columns) == wanted:
             table.set_class(history, "history-view")
             return
@@ -1117,7 +1558,9 @@ class AuenApp(App[None]):
         table.add_column("Time", width=7, key="time")
         if history:
             table.add_column("Last", width=10, key="last")
-            table.add_column("Plays", width=5, key="plays")
+            table.add_column("Plays", width=6, key="plays")
+        if status:
+            table.add_column("●", width=1, key="status")
         table.set_class(history, "history-view")
 
     @on(DataTable.RowSelected, "#results")
@@ -1126,6 +1569,16 @@ class AuenApp(App[None]):
             entry = self._selected_history_entry()
             if entry is not None:
                 self._request_history_queue(entry.track, play_now=True, append=False)
+            return
+        if self._showing_named_playlists:
+            if self._active_named_playlist is None:
+                playlist = self._selected_named_playlist()
+                if playlist is not None:
+                    self._show_named_playlist_tracks(playlist)
+                return
+            track = self._selected_named_playlist_track()
+            if track is not None:
+                self._request_history_queue(track, play_now=True, append=False)
             return
         if str(event.row_key.value) == _LOAD_MORE_KEY:
             self.push_screen(
@@ -1211,11 +1664,29 @@ class AuenApp(App[None]):
             limit=self._search_limit,
             has_more=self._search_has_more,
             history_entries=list(self._history_entries) if self._showing_history else None,
+            playlists=list(self._named_playlists) if self._showing_named_playlists else None,
+            active_playlist=self._active_named_playlist,
+            playlist_tracks=(
+                [item for item in self._result_order if isinstance(item, Track)]
+                if self._active_named_playlist is not None
+                else None
+            ),
         )
 
     def _restore_results_state(self, state: ResultsViewState) -> None:
         if state.history_entries is not None:
             self._show_history(state.history_entries, cursor_row=state.cursor_row)
+            return
+        if state.playlists is not None:
+            if state.active_playlist is not None:
+                self._named_playlists = list(state.playlists)
+                self._show_named_playlist_tracks(
+                    state.active_playlist,
+                    state.playlist_tracks or [],
+                    cursor_row=state.cursor_row,
+                )
+            else:
+                self._show_named_playlists(state.playlists, cursor_row=state.cursor_row)
             return
         self._active_query = state.query
         self._search_limit = state.limit
@@ -1233,10 +1704,14 @@ class AuenApp(App[None]):
 
     def _show_search_state(self, message: str) -> None:
         table = self.query_one("#results", DataTable)
-        self._configure_results_columns(history=False)
+        self._configure_results_columns(history=False, status=False)
         table.clear()
         self._showing_history = False
         self._history_entries = []
+        self._showing_named_playlists = False
+        self._named_playlists = []
+        self._active_named_playlist = None
+        table.remove_class("playlist-tracks")
         self._result_order = []
         self.search_results = {}
         self._results_heading = "Results"
@@ -1310,33 +1785,89 @@ class AuenApp(App[None]):
         }
         title_width = self._table_title_width(table)
         for position, track in enumerate(self.session.playlist.queue_list):
-            if track.is_cached:
-                availability = "✓"
-            elif self.session.downloads.is_active(track.uri):
-                availability = "↓"
-            else:
-                availability = "↗"
             table.add_row(
                 str(position + 1),
                 _title_cell(track.title, title_width, 0)[0],
                 track.duration_display or "-",
-                availability,
+                self._availability_symbol(track),
                 key=f"{track.track_id}:{position}",
             )
         self.query_one("#queue-title", Label).update(
             f"≡ Queue · {self.session.playlist.queue_length}"
         )
 
+    def _availability_symbol(self, track: Track) -> str:
+        if track.is_cached:
+            return "✓"
+        cached = self.session.cache.get(track.uri)
+        if cached is not None:
+            track.cached_path = cached.path
+            return "✓"
+        if self.session.downloads.is_active(track.uri):
+            return "↓"
+        return "↗"
+
+    def _refresh_visible_availability(self) -> None:
+        self._refresh_queue()
+        if not (self._showing_history or self._active_named_playlist is not None):
+            return
+        table = self.query_one("#results", DataTable)
+        for position, item in enumerate(self._result_order):
+            if not isinstance(item, Track):
+                continue
+            row_key = _result_row_key(item, position)
+            try:
+                table.update_cell(
+                    row_key,
+                    "status",
+                    self._availability_symbol(item),
+                    update_width=False,
+                )
+            except CellDoesNotExist:
+                return
+
+    def _update_context_guides(self) -> None:
+        if not self.query("#results-guide"):
+            return
+        if self._active_named_playlist is not None:
+            results_text = (
+                "Enter play · Home next · a queue · e queue all · s save · "
+                "Shift+↑/↓ move · Del remove · Esc back"
+            )
+        elif self._showing_named_playlists:
+            results_text = "Enter open · c create · r rename · Del delete · Esc back"
+        elif self._showing_history:
+            results_text = (
+                "Enter play · Home next · a queue · s save · Del remove · c clear · Esc back"
+            )
+        else:
+            results_text = "Enter queue/open · s save · ←/→ title · h history · p playlists"
+        self.query_one("#results-guide", Static).update(results_text)
+        self.query_one("#queue-guide", Static).update(
+            "Enter play · Home next · s save · Shift+↑/↓ move · Del remove"
+        )
+        results = self.query_one("#results", DataTable)
+        queue = self.query_one("#queue", DataTable)
+        self.query_one("#results-pane").set_class(results.has_focus, "guide-visible")
+        self.query_one("#queue-pane").set_class(queue.has_focus, "guide-visible")
+
     def _shift_title(self, table: DataTable[object], delta: int) -> None:
         row = table.cursor_row
         if row < 0:
             return
         if table.id == "results":
-            if row >= len(self._result_order):
-                return
-            item = self._result_order[row]
-            title = _result_title(item)
-            row_key = _result_row_key(item, row)
+            if self._showing_named_playlists and self._active_named_playlist is None:
+                if row >= len(self._named_playlists):
+                    return
+                playlist = self._named_playlists[row]
+                title = f"≡ {playlist.name}"
+                row_key = f"playlist:{playlist.playlist_id}"
+            else:
+                if row >= len(self._result_order):
+                    return
+                item = self._result_order[row]
+                title = _result_title(item)
+                row_key = _result_row_key(item, row)
         else:
             queue = self.session.playlist.queue_list
             if row >= len(queue):
@@ -1355,7 +1886,15 @@ class AuenApp(App[None]):
         # Leave one cell for Textual's vertical scrollbar in addition to the
         # fixed metadata columns. Otherwise the scrollbar obscures the final
         # duration digit when the pane has enough rows to scroll.
-        reserved = (25 if self._showing_history else 9) if table.id == "results" else 13
+        if table.id == "results":
+            if self._showing_history:
+                reserved = 28
+            elif self._active_named_playlist is not None:
+                reserved = 11
+            else:
+                reserved = 9
+        else:
+            reserved = 13
         return max(6, table.size.width - reserved)
 
     def _reset_title_pages(self, table: DataTable[object]) -> None:
@@ -1366,10 +1905,16 @@ class AuenApp(App[None]):
         table.scroll_x = 0
         title_width = self._table_title_width(table)
         if table_id == "results":
-            rows = (
-                (_result_row_key(item, position), _result_title(item))
-                for position, item in enumerate(self._result_order)
-            )
+            if self._showing_named_playlists and self._active_named_playlist is None:
+                rows = (
+                    (f"playlist:{playlist.playlist_id}", f"≡ {playlist.name}")
+                    for playlist in self._named_playlists
+                )
+            else:
+                rows = (
+                    (_result_row_key(item, position), _result_title(item))
+                    for position, item in enumerate(self._result_order)
+                )
         else:
             rows = (
                 (f"{track.track_id}:{position}", track.title)
@@ -1395,6 +1940,18 @@ class AuenApp(App[None]):
         table.refresh(layout=True)
 
         if table.id == "results":
+            if self._showing_named_playlists and self._active_named_playlist is None:
+                for playlist in self._named_playlists:
+                    row_key = f"playlist:{playlist.playlist_id}"
+                    page_key = ("results", row_key)
+                    rendered, page = _title_cell(
+                        f"≡ {playlist.name}",
+                        self._table_title_width(table),
+                        self._title_pages.get(page_key, 0),
+                    )
+                    self._title_pages[page_key] = page
+                    self._update_title_cell(table, row_key, rendered)
+                return
             for row, item in enumerate(self._result_order):
                 if row >= table.row_count:
                     break
@@ -1439,7 +1996,7 @@ class AuenApp(App[None]):
         if not self.is_running:
             return
         if exception is None:
-            self.call_from_thread(self._refresh_queue)
+            self.call_from_thread(self._refresh_visible_availability)
             self.call_from_thread(self.notify, "Media is available offline", title="Download")
         else:
             self.call_from_thread(
@@ -1554,12 +2111,198 @@ class AuenApp(App[None]):
             title="Recently played",
         )
 
-    def action_enqueue_history(self) -> None:
-        if not self._showing_history or not self.query_one("#results", DataTable).has_focus:
+    def action_show_playlists(self) -> None:
+        if self._showing_named_playlists:
+            if self._active_named_playlist is not None:
+                self._show_named_playlists(
+                    cursor_playlist_id=self._active_named_playlist.playlist_id
+                )
+            else:
+                self._leave_playlists()
             return
-        entry = self._selected_history_entry()
-        if entry is not None:
-            self._request_history_queue(entry.track, play_now=False, append=True)
+        self._playlist_return = self._capture_results_state()
+        self._search_generation += 1
+        self._search_loading = False
+        self._show_named_playlists()
+        self.notify(
+            "Enter open · c create · r rename · Del delete · s add track · Esc back",
+            title="Named playlists",
+        )
+
+    def _leave_playlists(self) -> None:
+        state = self._playlist_return
+        self._playlist_return = None
+        if state is None:
+            self._show_results([])
+            return
+        self._restore_results_state(state)
+
+    def action_add_to_playlist(self) -> None:
+        track = self._selected_track_for_playlist()
+        if track is None:
+            self.notify("Select a track first", title="Add to playlist", severity="warning")
+            return
+        playlists = self.session.named_playlists()
+        if not playlists:
+            self.push_screen(
+                PlaylistNameScreen("Create playlist", "Create and add"),
+                lambda name: self._playlist_created_for_track(track, name),
+            )
+            return
+        if len(playlists) == 1:
+            self._request_add_to_named_playlist(playlists[0], track)
+            return
+        self.push_screen(
+            PlaylistPickerScreen(playlists),
+            lambda playlist_id: self._playlist_picked_for_track(track, playlist_id),
+        )
+
+    def action_enqueue_playlist(self) -> None:
+        results = self.query_one("#results", DataTable)
+        playlist = self._active_named_playlist
+        if not results.has_focus or playlist is None:
+            return
+        if playlist.track_count == 0:
+            self.notify("This playlist has no tracks", title="Queue playlist")
+            return
+        self.push_screen(
+            QueuePlaylistScreen(playlist),
+            lambda confirmed: self._enqueue_playlist_decided(playlist, confirmed),
+        )
+
+    def _enqueue_playlist_decided(
+        self,
+        playlist: SavedPlaylist,
+        confirmed: bool | None,
+    ) -> None:
+        if not confirmed:
+            return
+        tracks = self.session.named_playlist_tracks(playlist.playlist_id)
+        if not tracks:
+            self.notify("This playlist has no tracks", title="Queue playlist")
+            return
+        futures = self.session.enqueue_many(
+            tracks,
+            session_mode=self.current_session_mode,
+        )
+        self._refresh_queue()
+        self.notify(
+            f"{len(tracks)} tracks appended in saved order",
+            title=playlist.name,
+        )
+        for future in futures:
+            future.add_done_callback(self._download_finished)
+
+    def _playlist_created_for_track(self, track: Track, name: str | None) -> None:
+        if name is None:
+            return
+        try:
+            playlist = self.session.create_named_playlist(name)
+        except ValueError as exc:
+            self.notify(str(exc), title="Playlist not created", severity="error")
+            return
+        self._add_to_named_playlist(playlist, track)
+
+    def _playlist_picked_for_track(self, track: Track, playlist_id: int | None) -> None:
+        if playlist_id is None:
+            return
+        playlist = next(
+            (
+                candidate
+                for candidate in self.session.named_playlists()
+                if candidate.playlist_id == playlist_id
+            ),
+            None,
+        )
+        if playlist is None:
+            self.notify("Playlist no longer exists", title="Add failed", severity="error")
+            return
+        self._request_add_to_named_playlist(playlist, track)
+
+    def _request_add_to_named_playlist(
+        self,
+        playlist: SavedPlaylist,
+        track: Track,
+    ) -> None:
+        if any(
+            existing.uri == track.uri
+            for existing in self.session.named_playlist_tracks(playlist.playlist_id)
+        ):
+            self.push_screen(
+                DuplicateQueueScreen(track, destination=f'playlist "{playlist.name}"'),
+                lambda confirmed: self._duplicate_named_playlist_decided(
+                    playlist, track, confirmed
+                ),
+            )
+            return
+        self._add_to_named_playlist(playlist, track)
+
+    def _duplicate_named_playlist_decided(
+        self,
+        playlist: SavedPlaylist,
+        track: Track,
+        confirmed: bool | None,
+    ) -> None:
+        if confirmed:
+            self._add_to_named_playlist(playlist, track)
+
+    def _add_to_named_playlist(self, playlist: SavedPlaylist, track: Track) -> None:
+        try:
+            self.session.add_to_named_playlist(playlist.playlist_id, track)
+        except ValueError as exc:
+            self.notify(str(exc), title="Add failed", severity="error")
+            return
+        self.notify(track.title, title=f"Added to {playlist.name}")
+        if self._active_named_playlist is not None and (
+            self._active_named_playlist.playlist_id == playlist.playlist_id
+        ):
+            self._show_named_playlist_tracks(self._active_named_playlist)
+        elif self._showing_named_playlists:
+            self._show_named_playlists(cursor_playlist_id=playlist.playlist_id)
+
+    def _selected_track_for_playlist(self) -> Track | None:
+        results = self.query_one("#results", DataTable)
+        if results.has_focus:
+            if self._showing_history:
+                entry = self._selected_history_entry()
+                return entry.track if entry is not None else None
+            if self._active_named_playlist is not None:
+                return self._selected_named_playlist_track()
+            if self._showing_named_playlists:
+                return None
+            if 0 <= results.cursor_row < len(self._result_order):
+                item = self._result_order[results.cursor_row]
+                return item if isinstance(item, Track) else None
+        queue = self.query_one("#queue", DataTable)
+        queued = self.session.playlist.queue_list
+        if queue.has_focus and 0 <= queue.cursor_row < len(queued):
+            return queued[queue.cursor_row]
+        return None
+
+    def _selected_named_playlist(self) -> SavedPlaylist | None:
+        row = self.query_one("#results", DataTable).cursor_row
+        if not 0 <= row < len(self._named_playlists):
+            return None
+        return self._named_playlists[row]
+
+    def _selected_named_playlist_track(self) -> Track | None:
+        row = self.query_one("#results", DataTable).cursor_row
+        if not 0 <= row < len(self._result_order):
+            return None
+        item = self._result_order[row]
+        return item if isinstance(item, Track) else None
+
+    def action_enqueue_history(self) -> None:
+        if not self.query_one("#results", DataTable).has_focus:
+            return
+        track: Track | None = None
+        if self._showing_history:
+            entry = self._selected_history_entry()
+            track = entry.track if entry is not None else None
+        elif self._active_named_playlist is not None:
+            track = self._selected_named_playlist_track()
+        if track is not None:
+            self._request_history_queue(track, play_now=False, append=True)
 
     def _leave_history(self) -> None:
         state = self._history_return
@@ -1570,6 +2313,12 @@ class AuenApp(App[None]):
         self._restore_results_state(state)
 
     def action_clear_history(self) -> None:
+        if self._showing_named_playlists and self._active_named_playlist is None:
+            self.push_screen(
+                PlaylistNameScreen("Create playlist", "Create"),
+                self._playlist_created,
+            )
+            return
         if not self._showing_history or not self._history_entries:
             return
         self.push_screen(ClearHistoryScreen(), self._clear_history_decided)
@@ -1586,6 +2335,42 @@ class AuenApp(App[None]):
         if not 0 <= row < len(self._history_entries):
             return None
         return self._history_entries[row]
+
+    def _playlist_created(self, name: str | None) -> None:
+        if name is None:
+            return
+        try:
+            playlist = self.session.create_named_playlist(name)
+        except ValueError as exc:
+            self.notify(str(exc), title="Playlist not created", severity="error")
+            return
+        self._show_named_playlists(cursor_playlist_id=playlist.playlist_id)
+        self.notify(playlist.name, title="Playlist created")
+
+    def action_rename_playlist(self) -> None:
+        if not self._showing_named_playlists or self._active_named_playlist is not None:
+            return
+        playlist = self._selected_named_playlist()
+        if playlist is None:
+            return
+        self.push_screen(
+            PlaylistNameScreen("Rename playlist", "Rename", initial_name=playlist.name),
+            lambda name: self._playlist_renamed(playlist, name),
+        )
+
+    def _playlist_renamed(self, playlist: SavedPlaylist, name: str | None) -> None:
+        if name is None:
+            return
+        try:
+            renamed = self.session.rename_named_playlist(playlist.playlist_id, name)
+        except ValueError as exc:
+            self.notify(str(exc), title="Playlist not renamed", severity="error")
+            return
+        if not renamed:
+            self.notify("Playlist no longer exists", title="Rename failed", severity="error")
+            return
+        self._show_named_playlists(cursor_playlist_id=playlist.playlist_id)
+        self.notify(name.strip(), title="Playlist renamed")
 
     def action_leave_search(self) -> None:
         if self._search_loading:
@@ -1735,6 +2520,30 @@ class AuenApp(App[None]):
 
     def action_remove_queued(self) -> None:
         results = self.query_one("#results", DataTable)
+        if self._showing_named_playlists and results.has_focus:
+            if self._active_named_playlist is None:
+                playlist = self._selected_named_playlist()
+                if playlist is not None:
+                    cursor_row = results.cursor_row
+                    self.push_screen(
+                        DeletePlaylistScreen(playlist),
+                        lambda confirmed: self._delete_named_playlist_decided(
+                            playlist, cursor_row, confirmed
+                        ),
+                    )
+                return
+            cursor_row = results.cursor_row
+            removed = self.session.remove_from_named_playlist(
+                self._active_named_playlist.playlist_id,
+                cursor_row,
+            )
+            if removed is not None:
+                self._show_named_playlist_tracks(
+                    self._active_named_playlist,
+                    cursor_row=max(0, cursor_row),
+                )
+                self.notify(removed.title, title="Removed from playlist")
+            return
         if self._showing_history and results.has_focus:
             entry = self._selected_history_entry()
             if entry is None:
@@ -1745,8 +2554,23 @@ class AuenApp(App[None]):
                 self.notify(entry.track.title, title="Removed from history")
             return
         table = self.query_one("#queue", DataTable)
-        if table.has_focus and self.session.remove_queued(table.cursor_row) is not None:
+        cursor_row = table.cursor_row
+        if table.has_focus and self.session.remove_queued(cursor_row) is not None:
             self._refresh_queue()
+            if table.row_count:
+                table.move_cursor(row=min(cursor_row, table.row_count - 1))
+
+    def _delete_named_playlist_decided(
+        self,
+        playlist: SavedPlaylist,
+        cursor_row: int,
+        confirmed: bool | None,
+    ) -> None:
+        if not confirmed:
+            return
+        if self.session.delete_named_playlist(playlist.playlist_id):
+            self._show_named_playlists(cursor_row=max(0, cursor_row))
+            self.notify(playlist.name, title="Playlist deleted")
 
 
 def run() -> None:

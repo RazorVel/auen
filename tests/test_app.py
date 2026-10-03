@@ -13,8 +13,12 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Select
 from auen.app import (
     AuenApp,
     ClearHistoryScreen,
+    DeletePlaylistScreen,
     DuplicateQueueScreen,
     LoadMoreScreen,
+    PlaylistNameScreen,
+    PlaylistPickerScreen,
+    QueuePlaylistScreen,
     SearchInput,
     SessionModeScreen,
     SettingsScreen,
@@ -892,6 +896,34 @@ async def test_queue_supports_play_next_reorder_and_play_now(tmp_path: Path) -> 
         assert queue.get_cell(f"{tracks[1].track_id}:0", "status") == "↗"
 
 
+async def test_queue_deletion_keeps_nearest_row_selected(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    tracks = [
+        Track(title=f"Track {index}", source=TrackSource.LOCAL, uri=f"/{index}.opus")
+        for index in range(4)
+    ]
+
+    async with app.run_test() as pilot:
+        app.session.playlist.add_many(tracks)
+        app._refresh_queue()
+        queue = app.query_one("#queue", DataTable)
+        queue.focus()
+
+        queue.move_cursor(row=1)
+        await pilot.press("delete")
+        assert app.session.playlist.queue_list == [tracks[0], tracks[2], tracks[3]]
+        assert queue.cursor_row == 1
+
+        queue.move_cursor(row=2)
+        await pilot.press("delete")
+        assert app.session.playlist.queue_list == [tracks[0], tracks[2]]
+        assert queue.cursor_row == 1
+
+        await pilot.press("delete", "delete")
+        assert app.session.playlist.queue_list == []
+        assert queue.row_count == 0
+
+
 async def test_history_view_restores_previous_results_and_cursor(tmp_path: Path) -> None:
     app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
     results = [
@@ -975,10 +1007,13 @@ async def test_history_shortcuts_type_normally_in_search(tmp_path: Path) -> None
     async with app.run_test() as pilot:
         search = app.query_one("#search-bar", Input)
         search.focus()
-        await pilot.press("a", "h", "c")
+        await pilot.press("a", "h", "c", "p", "r", "s")
 
-        assert search.value == "ahc"
+        assert search.value == "ahcprs"
         assert not app._showing_history
+
+        await pilot.press("ctrl+a", "s")
+        assert search.value == "s"
 
 
 async def test_history_supports_remove_and_confirmed_clear(tmp_path: Path) -> None:
@@ -1032,3 +1067,325 @@ async def test_history_columns_remain_contained_when_resized(tmp_path: Path) -> 
             )
             assert table.get_cell(f"{track.track_id}:0", "time") == "1:29:39"
             assert table.get_cell(f"{track.track_id}:0", "plays") == "1"
+
+
+async def test_named_playlist_create_rename_delete_and_restore_results(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    result = Track(title="Search result", source=TrackSource.LOCAL, uri="/result.opus")
+
+    async with app.run_test() as pilot:
+        app._show_results([result])
+        await pilot.press("p")
+        assert "Playlists · 0" in str(app.query_one("#results-title", Label).render())
+
+        await pilot.press("c")
+        assert isinstance(app.screen, PlaylistNameScreen)
+        app.screen.query_one("#playlist-name-input", Input).value = "Road Trip"
+        await pilot.press("enter")
+        assert app.session.named_playlists()[0].name == "Road Trip"
+
+        await pilot.press("enter")
+        assert "Road Trip · 0" in str(app.query_one("#results-title", Label).render())
+        await pilot.press("escape")
+
+        await pilot.press("r")
+        assert isinstance(app.screen, PlaylistNameScreen)
+        app.screen.query_one("#playlist-name-input", Input).value = "Favorites"
+        await pilot.press("enter")
+        assert app.session.named_playlists()[0].name == "Favorites"
+
+        await pilot.press("delete")
+        assert isinstance(app.screen, DeletePlaylistScreen)
+        await pilot.press("escape")
+        assert len(app.session.named_playlists()) == 1
+
+        await pilot.press("delete")
+        await pilot.click("#confirm-delete-playlist")
+        assert app.session.named_playlists() == []
+
+        await pilot.press("escape")
+        assert "Results · 1" in str(app.query_one("#results-title", Label).render())
+        assert app._result_order == [result]
+
+
+async def test_add_to_named_playlist_from_results_history_and_queue(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    playlist = app.session.create_named_playlist("Mix")
+    result = Track(title="Result", source=TrackSource.LOCAL, uri="/result.opus")
+    history = Track(title="History", source=TrackSource.LOCAL, uri="/history.opus")
+    queued = Track(title="Queued", source=TrackSource.LOCAL, uri="/queued.opus")
+    app.session.state.record_play(history)
+    app.session.enqueue(queued)
+
+    async with app.run_test() as pilot:
+        app._show_results([result])
+        await pilot.press("s")
+
+        await pilot.press("h")
+        await pilot.press("s")
+
+        queue = app.query_one("#queue", DataTable)
+        queue.focus()
+        await pilot.press("s")
+
+        tracks = app.session.named_playlist_tracks(playlist.playlist_id)
+        assert [track.title for track in tracks] == ["Result", "History", "Queued"]
+
+
+async def test_add_to_playlist_picker_and_duplicate_confirmation(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    first = app.session.create_named_playlist("First")
+    app.session.create_named_playlist("Second")
+    track = Track(title="Selected", source=TrackSource.LOCAL, uri="/selected.opus")
+
+    async with app.run_test() as pilot:
+        app._show_results([track])
+        await pilot.press("s")
+        assert isinstance(app.screen, PlaylistPickerScreen)
+        await pilot.press("enter")
+        assert app.session.named_playlist_tracks(first.playlist_id) == [track]
+
+        await pilot.press("s")
+        await pilot.press("enter")
+        assert isinstance(app.screen, DuplicateQueueScreen)
+        await pilot.press("escape")
+        assert len(app.session.named_playlist_tracks(first.playlist_id)) == 1
+
+        await pilot.press("s")
+        await pilot.press("enter")
+        await pilot.click("#confirm-duplicate")
+        assert len(app.session.named_playlist_tracks(first.playlist_id)) == 2
+
+
+async def test_add_to_playlist_creates_first_playlist_when_none_exist(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(title="First saved track", source=TrackSource.LOCAL, uri="/first.opus")
+
+    async with app.run_test() as pilot:
+        app._show_results([track])
+        await pilot.press("s")
+        assert isinstance(app.screen, PlaylistNameScreen)
+        app.screen.query_one("#playlist-name-input", Input).value = "First playlist"
+        await pilot.press("enter")
+
+        playlist = app.session.named_playlists()[0]
+        assert playlist.name == "First playlist"
+        assert app.session.named_playlist_tracks(playlist.playlist_id) == [track]
+
+
+async def test_named_playlist_tracks_reorder_remove_and_queue_actions(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    playlist = app.session.create_named_playlist("Ordered")
+    tracks = [
+        Track(title=f"Track {index}", source=TrackSource.LOCAL, uri=f"/{index}.opus")
+        for index in range(3)
+    ]
+    for track in tracks:
+        app.session.add_to_named_playlist(playlist.playlist_id, track)
+
+    async with app.run_test() as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("p")
+        await pilot.press("enter")
+        table = app.query_one("#results", DataTable)
+
+        table.move_cursor(row=2)
+        await pilot.press("shift+up")
+        assert app.session.named_playlist_tracks(playlist.playlist_id) == [
+            tracks[0],
+            tracks[2],
+            tracks[1],
+        ]
+
+        await pilot.press("delete")
+        assert app.session.named_playlist_tracks(playlist.playlist_id) == [
+            tracks[0],
+            tracks[1],
+        ]
+
+        await pilot.press("enter")
+        table.move_cursor(row=0)
+        await pilot.press("home")
+        assert app.session.playlist.queue_list == [tracks[0], tracks[1]]
+
+        table.move_cursor(row=1)
+        await pilot.press("a")
+        assert isinstance(app.screen, DuplicateQueueScreen)
+        await pilot.click("#confirm-duplicate")
+        assert app.session.playlist.queue_list == [tracks[0], tracks[1], tracks[1]]
+
+
+async def test_named_playlists_remain_contained_when_resized(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    playlist = app.session.create_named_playlist(
+        "🔥 A deliberately very long mobile playlist name with mixed عنوان characters"
+    )
+    track = Track(
+        title="A very long playlist track 🚒🔥 with mixed عنوان characters",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=playlist-resize",
+        duration_display="1:29:39",
+    )
+    app.session.add_to_named_playlist(playlist.playlist_id, track)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("p")
+        table = app.query_one("#results", DataTable)
+
+        await pilot.resize_terminal(60, 30)
+        await pilot.pause()
+        narrow_title = str(
+            table.get_cell(f"playlist:{playlist.playlist_id}", "title")
+        )
+        assert "→" in narrow_title
+
+        for width, height in ((120, 35), (55, 25), (200, 35)):
+            await pilot.resize_terminal(width, height)
+            await pilot.pause()
+            assert sum(column.get_render_width(table) for column in table.ordered_columns) <= (
+                table.size.width - 1
+            )
+
+        wide_title = str(table.get_cell(f"playlist:{playlist.playlist_id}", "title"))
+        assert "→" not in wide_title
+
+        await pilot.press("enter")
+        assert table.get_cell(f"{track.track_id}:0", "time") == "1:29:39"
+        assert sum(column.get_render_width(table) for column in table.ordered_columns) <= (
+            table.size.width - 1
+        )
+
+
+async def test_history_and_named_playlist_show_cache_status(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    cached_file = tmp_path / "cached.opus"
+    cached_file.write_bytes(b"audio")
+    cached = Track(
+        title="Offline",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=offline-status",
+        cached_path=cached_file,
+    )
+    streaming = Track(
+        title="Streaming",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=stream-status",
+    )
+    downloading = Track(
+        title="Downloading",
+        source=TrackSource.YOUTUBE,
+        uri="https://youtube.com/watch?v=download-status",
+    )
+    app.session.state.record_play(streaming)
+    app.session.state.record_play(cached)
+    app.session.state.record_play(downloading)
+    playlist = app.session.create_named_playlist("Status")
+    app.session.add_to_named_playlist(playlist.playlist_id, cached)
+    app.session.add_to_named_playlist(playlist.playlist_id, downloading)
+    app.session.add_to_named_playlist(playlist.playlist_id, streaming)
+
+    with patch.object(
+        app.session.downloads,
+        "is_active",
+        side_effect=lambda uri: uri == downloading.uri,
+    ):
+        async with app.run_test() as pilot:
+            app.query_one("#results", DataTable).focus()
+            await pilot.press("h")
+            table = app.query_one("#results", DataTable)
+            assert table.get_cell(f"{downloading.track_id}:0", "status") == "↓"
+            assert table.get_cell(f"{cached.track_id}:1", "status") == "✓"
+            assert table.get_cell(f"{streaming.track_id}:2", "status") == "↗"
+            assert [column.label.plain for column in table.ordered_columns][-1] == "●"
+            assert table.ordered_columns[3].width == 6
+
+            await pilot.press("escape", "p", "enter")
+            assert table.get_cell(f"{cached.track_id}:0", "status") == "✓"
+            assert table.get_cell(f"{downloading.track_id}:1", "status") == "↓"
+            assert table.get_cell(f"{streaming.track_id}:2", "status") == "↗"
+            assert sum(
+                column.get_render_width(table) for column in table.ordered_columns
+            ) <= (table.size.width - 1)
+
+
+async def test_open_named_playlist_can_append_every_track_in_order(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    playlist = app.session.create_named_playlist("Whole album")
+    first = Track(title="First", source=TrackSource.LOCAL, uri="/first.opus")
+    second = Track(title="Second", source=TrackSource.LOCAL, uri="/second.opus")
+    app.session.add_to_named_playlist(playlist.playlist_id, first)
+    app.session.add_to_named_playlist(playlist.playlist_id, second)
+    app.session.add_to_named_playlist(playlist.playlist_id, first)
+
+    async with app.run_test() as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("p", "enter", "e")
+        assert isinstance(app.screen, QueuePlaylistScreen)
+        await pilot.press("escape")
+        assert app.session.playlist.queue_list == []
+
+        await pilot.press("e")
+        await pilot.click("#confirm-queue-playlist")
+        assert app.session.playlist.queue_list == [first, second, first]
+        assert app.query_one("#queue", DataTable).row_count == 3
+
+
+async def test_context_guide_follows_focused_pane_and_view(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    app.session.state.record_play(
+        Track(title="Played", source=TrackSource.LOCAL, uri="/played.opus")
+    )
+
+    async with app.run_test() as pilot:
+        results = app.query_one("#results", DataTable)
+        results.focus()
+        await pilot.pause()
+        assert app.query_one("#results-pane").has_class("guide-visible")
+        assert not app.query_one("#queue-pane").has_class("guide-visible")
+        assert "Enter queue/open" in str(app.query_one("#results-guide").render())
+
+        await pilot.press("tab")
+        assert not app.query_one("#results-pane").has_class("guide-visible")
+        assert app.query_one("#queue-pane").has_class("guide-visible")
+
+        await pilot.press("tab", "h")
+        assert "c clear" in str(app.query_one("#results-guide").render())
+
+        await pilot.press("f2")
+        assert "Ctrl+S save" in str(app.screen.query_one("#settings-guide").render())
+
+
+async def test_playlist_deletion_keeps_nearest_row_selected(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    playlists = [
+        app.session.create_named_playlist(name) for name in ("First", "Second", "Third")
+    ]
+    tracks = [
+        Track(title=f"Track {index}", source=TrackSource.LOCAL, uri=f"/{index}.opus")
+        for index in range(3)
+    ]
+    for track in tracks:
+        app.session.add_to_named_playlist(playlists[2].playlist_id, track)
+
+    async with app.run_test() as pilot:
+        table = app.query_one("#results", DataTable)
+        table.focus()
+        await pilot.press("p")
+        table.move_cursor(row=1)
+        await pilot.press("delete")
+        await pilot.click("#confirm-delete-playlist")
+        assert table.cursor_row == 1
+        selected = app._selected_named_playlist()
+        assert selected is not None
+        assert selected.playlist_id == playlists[2].playlist_id
+
+        await pilot.press("enter")
+        table.move_cursor(row=1)
+        await pilot.press("delete")
+        assert table.cursor_row == 1
+        assert app._selected_named_playlist_track() == tracks[2]
+
+        await pilot.press("delete")
+        assert table.cursor_row == 0
+        assert app._selected_named_playlist_track() == tracks[0]

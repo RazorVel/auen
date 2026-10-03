@@ -77,6 +77,15 @@ class HistoryEntry:
     play_count: int = 1
 
 
+@dataclass(slots=True, frozen=True)
+class SavedPlaylist:
+    """A durable user-named ordered collection."""
+
+    playlist_id: int
+    name: str
+    track_count: int = 0
+
+
 @dataclass(slots=True)
 class MediaCollection:
     title: str

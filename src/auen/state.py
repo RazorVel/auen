@@ -12,7 +12,7 @@ from typing import Any
 
 from platformdirs import user_state_dir
 
-from auen.models import HistoryEntry, RepeatMode, Track, TrackSource
+from auen.models import HistoryEntry, RepeatMode, SavedPlaylist, Track, TrackSource
 
 
 @dataclass(slots=True)
@@ -36,6 +36,7 @@ class StateStore:
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute("PRAGMA journal_mode = WAL")
         self._connection.execute("PRAGMA synchronous = FULL")
         self._create_schema()
@@ -70,9 +71,204 @@ class StateStore:
                     play_count INTEGER NOT NULL DEFAULT 1
                 );
 
-                PRAGMA user_version = 2;
+                CREATE TABLE IF NOT EXISTS saved_playlists (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS saved_playlist_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    playlist_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    track TEXT NOT NULL,
+                    FOREIGN KEY(playlist_id) REFERENCES saved_playlists(id) ON DELETE CASCADE,
+                    UNIQUE(playlist_id, position)
+                );
+
+                PRAGMA user_version = 3;
                 """
             )
+
+    def create_named_playlist(self, name: str) -> SavedPlaylist:
+        """Create a uniquely named empty playlist."""
+        normalized = _playlist_name(name)
+        try:
+            with self._lock, self._connection:
+                cursor = self._connection.execute(
+                    "INSERT INTO saved_playlists(name) VALUES (?)",
+                    (normalized,),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f'A playlist named "{normalized}" already exists') from exc
+        playlist_id = cursor.lastrowid
+        if playlist_id is None:
+            raise RuntimeError("playlist was created without an identifier")
+        return SavedPlaylist(int(playlist_id), normalized)
+
+    def list_named_playlists(self) -> list[SavedPlaylist]:
+        """Return named playlists alphabetically with their current track counts."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT playlists.id, playlists.name, COUNT(items.id) AS track_count
+                FROM saved_playlists AS playlists
+                LEFT JOIN saved_playlist_items AS items ON items.playlist_id = playlists.id
+                GROUP BY playlists.id, playlists.name
+                ORDER BY playlists.name COLLATE NOCASE, playlists.id
+                """
+            ).fetchall()
+        return [
+            SavedPlaylist(
+                playlist_id=int(row["id"]),
+                name=str(row["name"]),
+                track_count=int(row["track_count"]),
+            )
+            for row in rows
+        ]
+
+    def rename_named_playlist(self, playlist_id: int, name: str) -> bool:
+        """Rename a playlist while preserving its identity and order."""
+        normalized = _playlist_name(name)
+        try:
+            with self._lock, self._connection:
+                cursor = self._connection.execute(
+                    """
+                    UPDATE saved_playlists
+                    SET name = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (normalized, playlist_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f'A playlist named "{normalized}" already exists') from exc
+        return cursor.rowcount > 0
+
+    def delete_named_playlist(self, playlist_id: int) -> bool:
+        """Delete a playlist and its owned item rows."""
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM saved_playlists WHERE id = ?",
+                (playlist_id,),
+            )
+        return cursor.rowcount > 0
+
+    def load_named_playlist_tracks(self, playlist_id: int) -> list[Track]:
+        """Load playlist tracks in their durable user-defined order."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT track FROM saved_playlist_items
+                WHERE playlist_id = ?
+                ORDER BY position
+                """,
+                (playlist_id,),
+            ).fetchall()
+        return [_decode_track(row["track"]) for row in rows]
+
+    def add_named_playlist_track(self, playlist_id: int, track: Track) -> int:
+        """Append a track and return its zero-based position."""
+        with self._lock, self._connection:
+            exists = self._connection.execute(
+                "SELECT 1 FROM saved_playlists WHERE id = ?",
+                (playlist_id,),
+            ).fetchone()
+            if exists is None:
+                raise ValueError("playlist no longer exists")
+            row = self._connection.execute(
+                """
+                SELECT COALESCE(MAX(position), -1) + 1 AS next_position
+                FROM saved_playlist_items WHERE playlist_id = ?
+                """,
+                (playlist_id,),
+            ).fetchone()
+            position = int(row["next_position"])
+            self._connection.execute(
+                """
+                INSERT INTO saved_playlist_items(playlist_id, position, track)
+                VALUES (?, ?, ?)
+                """,
+                (playlist_id, position, _encode_track(track)),
+            )
+            self._touch_named_playlist(playlist_id)
+        return position
+
+    def remove_named_playlist_track(self, playlist_id: int, position: int) -> Track | None:
+        """Remove one track and compact all following positions."""
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """
+                SELECT id, track FROM saved_playlist_items
+                WHERE playlist_id = ? AND position = ?
+                """,
+                (playlist_id, position),
+            ).fetchone()
+            if row is None:
+                return None
+            self._connection.execute(
+                "DELETE FROM saved_playlist_items WHERE id = ?",
+                (int(row["id"]),),
+            )
+            self._connection.execute(
+                """
+                UPDATE saved_playlist_items SET position = -position - 1
+                WHERE playlist_id = ? AND position > ?
+                """,
+                (playlist_id, position),
+            )
+            self._connection.execute(
+                """
+                UPDATE saved_playlist_items SET position = -position - 2
+                WHERE playlist_id = ? AND position < 0
+                """,
+                (playlist_id,),
+            )
+            self._touch_named_playlist(playlist_id)
+        return _decode_track(row["track"])
+
+    def move_named_playlist_track(
+        self,
+        playlist_id: int,
+        position: int,
+        delta: int,
+    ) -> int | None:
+        """Move one playlist item relatively and return its new position."""
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                """
+                SELECT id FROM saved_playlist_items
+                WHERE playlist_id = ? ORDER BY position
+                """,
+                (playlist_id,),
+            ).fetchall()
+            if position < 0 or position >= len(rows):
+                return None
+            target = min(max(0, position + delta), len(rows) - 1)
+            if target == position:
+                return target
+            moving_id = int(rows[position]["id"])
+            target_id = int(rows[target]["id"])
+            self._connection.execute(
+                "UPDATE saved_playlist_items SET position = -1 WHERE id = ?",
+                (moving_id,),
+            )
+            self._connection.execute(
+                "UPDATE saved_playlist_items SET position = ? WHERE id = ?",
+                (position, target_id),
+            )
+            self._connection.execute(
+                "UPDATE saved_playlist_items SET position = ? WHERE id = ?",
+                (target, moving_id),
+            )
+            self._touch_named_playlist(playlist_id)
+        return target
+
+    def _touch_named_playlist(self, playlist_id: int) -> None:
+        self._connection.execute(
+            "UPDATE saved_playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (playlist_id,),
+        )
 
     def record_play(
         self,
@@ -275,3 +471,12 @@ def _decode_track(payload: str) -> Track:
         duration_display=data.get("duration_display"),
         track_id=str(data["track_id"]),
     )
+
+
+def _playlist_name(value: str) -> str:
+    normalized = " ".join(value.split())
+    if not normalized:
+        raise ValueError("playlist name cannot be empty")
+    if len(normalized) > 80:
+        raise ValueError("playlist name cannot exceed 80 characters")
+    return normalized

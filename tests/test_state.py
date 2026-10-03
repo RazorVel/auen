@@ -3,6 +3,8 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from auen.models import RepeatMode, Track, TrackSource
 from auen.state import SessionSnapshot, StateStore
 
@@ -99,3 +101,76 @@ def test_recent_history_survives_session_clear_and_supports_removal(tmp_path: Pa
         store.record_play(track)
         store.clear_recent_history()
         assert store.load_recent_history() == []
+
+
+def test_named_playlist_lifecycle_preserves_order_and_duplicates(tmp_path: Path) -> None:
+    first = make_track("first")
+    second = make_track("second")
+
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        playlist = store.create_named_playlist("  Road   Trip  ")
+        assert playlist.name == "Road Trip"
+        assert store.add_named_playlist_track(playlist.playlist_id, first) == 0
+        assert store.add_named_playlist_track(playlist.playlist_id, second) == 1
+        assert store.add_named_playlist_track(playlist.playlist_id, first) == 2
+
+        listed = store.list_named_playlists()
+        assert listed == [
+            type(playlist)(playlist.playlist_id, "Road Trip", track_count=3)
+        ]
+        titles = store.load_named_playlist_tracks(playlist.playlist_id)
+        assert [track.title for track in titles] == [
+            "first",
+            "second",
+            "first",
+        ]
+
+        assert store.move_named_playlist_track(playlist.playlist_id, 2, -1) == 1
+        titles = store.load_named_playlist_tracks(playlist.playlist_id)
+        assert [track.title for track in titles] == [
+            "first",
+            "first",
+            "second",
+        ]
+
+        removed = store.remove_named_playlist_track(playlist.playlist_id, 0)
+        assert removed is not None and removed.title == "first"
+        titles = store.load_named_playlist_tracks(playlist.playlist_id)
+        assert [track.title for track in titles] == [
+            "first",
+            "second",
+        ]
+
+        assert store.rename_named_playlist(playlist.playlist_id, "Favorites")
+        assert store.list_named_playlists()[0].name == "Favorites"
+        assert store.delete_named_playlist(playlist.playlist_id)
+        assert store.list_named_playlists() == []
+        assert store.load_named_playlist_tracks(playlist.playlist_id) == []
+
+
+def test_named_playlist_names_are_case_insensitively_unique(tmp_path: Path) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.create_named_playlist("Focus")
+
+        with pytest.raises(ValueError, match="already exists"):
+            store.create_named_playlist("focus")
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            store.create_named_playlist("   ")
+
+
+def test_named_playlists_survive_store_restart(tmp_path: Path) -> None:
+    database = tmp_path / "state.sqlite3"
+    track = make_track("persistent")
+
+    with StateStore(database) as store:
+        playlist = store.create_named_playlist("Persistent")
+        store.add_named_playlist_track(playlist.playlist_id, track)
+
+    with StateStore(database) as restored:
+        playlists = restored.list_named_playlists()
+        tracks = restored.load_named_playlist_tracks(playlists[0].playlist_id)
+
+    assert playlists[0].name == "Persistent"
+    assert playlists[0].track_count == 1
+    assert tracks[0].track_id == track.track_id

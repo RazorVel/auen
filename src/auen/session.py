@@ -12,6 +12,7 @@ from auen.models import (
     HistoryEntry,
     MediaCollection,
     RepeatMode,
+    SavedPlaylist,
     SearchItem,
     SessionMode,
     Track,
@@ -125,6 +126,27 @@ class AuenSession:
             return self._auto_cache_executor.submit(self._cache_queued_track, track)
         return None
 
+    def enqueue_many(
+        self,
+        tracks: list[Track],
+        *,
+        session_mode: SessionMode = SessionMode.STREAM_ONLY,
+    ) -> list[Future[CacheEntry]]:
+        """Append tracks in order, persisting once and scheduling bounded caching."""
+        pending: list[Track] = []
+        for track in tracks:
+            cached = self.cache.get(track.uri)
+            if cached is not None:
+                track.cached_path = cached.path
+            elif session_mode is SessionMode.STREAM_AND_CACHE:
+                pending.append(track)
+        self.playlist.add_many(tracks)
+        self.save()
+        return [
+            self._auto_cache_executor.submit(self._cache_queued_track, track)
+            for track in pending
+        ]
+
     def recent_history(self) -> list[HistoryEntry]:
         return self.state.load_recent_history(limit=self.config.history_limit)
 
@@ -136,6 +158,35 @@ class AuenSession:
 
     def prune_recent_history(self) -> None:
         self.state.prune_recent_history(self.config.history_limit)
+
+    def create_named_playlist(self, name: str) -> SavedPlaylist:
+        return self.state.create_named_playlist(name)
+
+    def named_playlists(self) -> list[SavedPlaylist]:
+        return self.state.list_named_playlists()
+
+    def rename_named_playlist(self, playlist_id: int, name: str) -> bool:
+        return self.state.rename_named_playlist(playlist_id, name)
+
+    def delete_named_playlist(self, playlist_id: int) -> bool:
+        return self.state.delete_named_playlist(playlist_id)
+
+    def named_playlist_tracks(self, playlist_id: int) -> list[Track]:
+        return self.state.load_named_playlist_tracks(playlist_id)
+
+    def add_to_named_playlist(self, playlist_id: int, track: Track) -> int:
+        return self.state.add_named_playlist_track(playlist_id, track)
+
+    def remove_from_named_playlist(self, playlist_id: int, position: int) -> Track | None:
+        return self.state.remove_named_playlist_track(playlist_id, position)
+
+    def move_named_playlist_track(
+        self,
+        playlist_id: int,
+        position: int,
+        delta: int,
+    ) -> int | None:
+        return self.state.move_named_playlist_track(playlist_id, position, delta)
 
     def _cache_queued_track(self, track: Track) -> CacheEntry:
         """Serialize automatic caching so it cannot saturate playback bandwidth."""

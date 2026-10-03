@@ -4,9 +4,9 @@
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Development status — v0.2.0:** v0.1.1 is the current tagged prototype. Core playback,
-> responsive rendering, and shutdown behavior have been exercised with `mpv` on Linux and
-> a physical Termux device. v0.2.0 adds a durable Recently Played view.
+> **Development status — v0.3.0:** v0.2.0 is the current tagged prototype. Core playback,
+> responsive rendering, History, and shutdown behavior have been exercised with `mpv` on
+> Linux and a physical Termux device. v0.3.0 adds durable named playlists.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
@@ -14,7 +14,7 @@ size-limited persistent playback cache.
 
 ![auen in a narrow terminal](docs/assets/auen-narrow.svg)
 
-## What works in the v0.2.0 development branch
+## What works in the v0.3.0 development branch
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
@@ -25,12 +25,18 @@ size-limited persistent playback cache.
   across restarts and crashes.
 - Open Recently Played with `h`, including last-played timestamps and play counts; play now,
   play next, remove individual entries, or clear history with confirmation.
+- Create, rename, delete, open, reorder, and play durable named playlists. Add tracks from
+  search results, History, Queue, or another named playlist, or append a whole playlist to
+  Queue in saved order.
+- See streaming, downloading, and offline availability directly in Queue, History, and an
+  opened named playlist.
+- Get compact, view-specific key guidance at the bottom of the focused Results or Queue pane.
 - Preview and save themes, with an adaptive side-by-side or stacked phone-width layout.
 - Configure behavior through the TUI or scriptable `auen config` commands.
 
-This is intentionally an early prototype. Named playlists, offline-library management,
-`:` command mode, and local directory import are planned for later versions. Some YouTube
-videos may require account cookies and cannot yet be played.
+This is intentionally an early prototype. Offline-library management, `:` command mode,
+and local directory import are planned for later versions. Some YouTube videos may require
+account cookies and cannot yet be played.
 
 ## Requirements
 
@@ -53,7 +59,7 @@ pipx ensurepath
 Install the tagged prototype directly from GitHub:
 
 ```console
-pipx install 'git+https://github.com/razorvel/auen.git@v0.1.1'
+pipx install 'git+https://github.com/razorvel/auen.git@v0.2.0'
 auen doctor
 auen
 ```
@@ -78,7 +84,7 @@ their signatures are compatible. Then, inside Termux:
 ```console
 pkg update
 pkg install python git termux-api mpv
-python -m pip install 'git+https://github.com/razorvel/auen.git@v0.1.1'
+python -m pip install 'git+https://github.com/razorvel/auen.git@v0.2.0'
 auen doctor
 auen
 ```
@@ -103,6 +109,9 @@ The real-device test sequence and expected limitations are recorded in
 | `g` | Jump to a timestamp |
 | `n` | Play next track |
 | `h` | Open or leave Recently Played |
+| `p` | Open or leave named Playlists |
+| `s` | Save the selected track to a named playlist |
+| `e` | Append every track in the currently open named playlist to Queue |
 | `d` | Retain the selected result for offline playback |
 | `Home` | Promote the selected queued track to play next |
 | `Shift+Up` / `Shift+Down` | Change queue priority |
@@ -114,6 +123,14 @@ The real-device test sequence and expected limitations are recorded in
 In Recently Played, Enter plays the selected track now, Home places it next, `a` appends it
 to Queue, Delete removes one entry, `c` clears all history after confirmation, and Escape
 returns to the exact prior Results view.
+
+In Playlists, `c` creates, `r` renames, Delete removes with confirmation, and Enter opens a
+playlist. Inside one, Enter plays now, Home plays next, `a` appends to Queue,
+`e` confirms and appends the entire playlist, Shift+Up/Down reorders, Delete removes a
+track, and Escape returns to the playlist list.
+
+Availability symbols are consistent across Queue, Recently Played, and opened playlists:
+`✓` is available offline, `↓` is downloading, and `↗` will stream.
 
 Left and Right page through a long selected title. Leaving that row restores its title to
 the beginning. Playback seeking deliberately uses `[` and `]`, so arrow keys remain safe
