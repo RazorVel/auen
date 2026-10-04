@@ -120,6 +120,47 @@ def test_skip_advances_to_next_track() -> None:
     player.close()
 
 
+def test_hold_after_current_waits_before_consuming_next_track() -> None:
+    playlist = Playlist()
+    backend = FakeBackend()
+    first = make_track("first")
+    second = make_track("second")
+    playlist.add_many([first, second])
+    player = PlaybackController(playlist, backend)
+    player.start()
+
+    wait_until(lambda: backend.played == [first.uri])
+    player.hold_after_current()
+    backend.ended.set()
+    wait_until(lambda: player.queue_held)
+    time.sleep(0.05)
+
+    assert backend.played == [first.uri]
+    assert playlist.queue_list == [second]
+
+    player.toggle_pause()
+    wait_until(lambda: backend.played == [first.uri, second.uri])
+    player.close()
+
+
+def test_skip_cancels_hold_after_current() -> None:
+    playlist = Playlist()
+    backend = FakeBackend()
+    first = make_track("first")
+    second = make_track("second")
+    playlist.add_many([first, second])
+    player = PlaybackController(playlist, backend)
+    player.start()
+
+    wait_until(lambda: backend.played == [first.uri])
+    player.hold_after_current()
+    player.skip()
+    wait_until(lambda: backend.played == [first.uri, second.uri])
+
+    assert not player.queue_held
+    player.close()
+
+
 def test_play_next_insertion_continues_with_existing_queue() -> None:
     playlist = Playlist()
     backend = FakeBackend()

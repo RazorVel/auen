@@ -1,6 +1,6 @@
 # Termux validation checklist
 
-Version 0.4.0 has been exercised with the Termux `mpv` package on a physical Android device.
+Version 0.5.0 has been exercised with the Termux `mpv` package on a physical Android device.
 Use this checklist for release and regression validation.
 
 ## Before launching
@@ -36,6 +36,19 @@ Use this checklist for release and regression validation.
    network access.
 7. If YouTube returns a bot challenge or HTTP 429, confirm the retry countdown appears and
    Offline playback remains available.
+
+## Command mode and sleep
+
+1. Focus Results or Queue, press `:`, and confirm the command field remains contained when
+   the Android keyboard opens and closes.
+2. Run `sleep 5s`. Confirm the active track pauses in place, the Queue is unchanged, and
+   Space resumes from the paused position.
+3. Queue another track and run `sleep track`. Confirm the active track finishes but the next
+   track waits until Space is pressed.
+4. Run `sleep cancel`, invalid sleep input, and the navigation commands. Confirm notices are
+   readable and no traceback appears.
+5. Focus Search and type `:`. Confirm it remains ordinary query text instead of opening
+   command mode.
 
 Record the Android version, Termux version, terminal dimensions, and any traceback when
 reporting a failure.

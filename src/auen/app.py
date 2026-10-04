@@ -9,9 +9,10 @@ import os
 import re
 import shutil
 import threading
+import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, ClassVar, cast
 
 from anyascii import anyascii
@@ -55,6 +56,15 @@ from auen.session import AuenSession
 
 _LOAD_MORE_KEY = "__load_more__"
 _STATE_KEY = "__state__"
+_MAX_SLEEP_SECONDS = 7 * 24 * 60 * 60
+
+
+@dataclass(frozen=True)
+class SleepCommand:
+    """Parsed sleep command independent of the Textual UI."""
+
+    mode: str
+    seconds: float | None = None
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -832,6 +842,52 @@ class SeekScreen(ModalScreen[float | None]):
         self.dismiss(None)
 
 
+class CommandScreen(ModalScreen[str | None]):
+    """Compact command entry that does not compete with ordinary shortcuts."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    CommandScreen {
+        align: center bottom;
+        background: $background 35%;
+    }
+    #command-dialog {
+        width: 1fr;
+        height: auto;
+        max-width: 88;
+        margin: 0 1 1 1;
+        padding: 0 1;
+        border: round $accent;
+        background: $surface;
+    }
+    #command-input {
+        border: none;
+        padding: 0;
+    }
+    CommandScreen.termux-safe #command-dialog {
+        border: ascii $accent;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="command-dialog"):
+            yield Static(": command · sleep 30m · sleep track · help")
+            yield Input(placeholder="Type a command…", id="command-input")
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
+        self.query_one("#command-input", Input).focus()
+
+    @on(Input.Submitted, "#command-input")
+    def submit_command(self, event: Input.Submitted) -> None:
+        command = event.value.strip()
+        self.dismiss(command or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class SettingsScreen(Screen[bool]):
     """Keyboard-friendly settings editor shared with the CLI configuration."""
 
@@ -1037,6 +1093,7 @@ class AuenApp(App[None]):
         Binding("h", "show_history", "◷ History"),
         Binding("p", "show_playlists", "≡ Playlists"),
         Binding("l", "show_library", "▣ Offline"),
+        Binding(":", "command_mode", ": Command"),
         Binding("s", "add_to_playlist", "Save to playlist", show=False),
         Binding("e", "enqueue_playlist", "Queue playlist", show=False),
         Binding("k", "toggle_offline_retained", "Keep offline", show=False),
@@ -1215,6 +1272,8 @@ class AuenApp(App[None]):
         self._settings_backend_before = self.config.backend
         self._settings_mode_before = self.config.session_mode
         self._settings_volume_before = self.config.volume
+        self._sleep_deadline: float | None = None
+        self._sleep_after_track = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -2359,12 +2418,9 @@ class AuenApp(App[None]):
             self._show_history(cursor_row=max(0, cursor_row))
 
     def _show_now_playing(self, track: Track | None) -> None:
-        message = (
-            "○ Nothing playing"
-            if track is None
-            else f"▶ {_terminal_safe_title(track.title)}"
+        self.query_one("#now-playing", Static).update(
+            self._now_playing_message(track, "▶")
         )
-        self.query_one("#now-playing", Static).update(message)
         if track is None:
             self._reset_progress()
 
@@ -2373,6 +2429,7 @@ class AuenApp(App[None]):
         # screen during shutdown. Avoid querying widgets after that point.
         if not self.query("#playback-time"):
             return
+        self._check_sleep_timer()
         self._refresh_download_status()
         player = self.session.player
         track = self.session.current_track
@@ -2387,7 +2444,7 @@ class AuenApp(App[None]):
         elapsed = max(0.0, status.elapsed_seconds)
         state_symbol = "Ⅱ" if status.state is PlaybackState.PAUSED else "▶"
         self.query_one("#now-playing", Static).update(
-            f"{state_symbol} {_terminal_safe_title(track.title)}"
+            self._now_playing_message(track, state_symbol)
         )
         duration = track.duration_seconds or status.duration_seconds
         if track.duration_seconds is None and duration is not None and duration > 0:
@@ -2452,6 +2509,160 @@ class AuenApp(App[None]):
 
     def action_focus_search(self) -> None:
         self.query_one("#search-bar", Input).focus()
+
+    def action_command_mode(self) -> None:
+        self.push_screen(CommandScreen(), self._command_entered)
+
+    def _command_entered(self, command: str | None) -> None:
+        if command is None:
+            return
+        self._execute_command(command)
+
+    def _execute_command(self, command: str) -> None:
+        value = command.strip().removeprefix(":").strip()
+        name, _, arguments = value.partition(" ")
+        name = name.casefold()
+        arguments = arguments.strip()
+        if name == "sleep":
+            try:
+                request = _parse_sleep_command(arguments)
+            except ValueError as exc:
+                self.notify(str(exc), title="Invalid sleep timer", severity="error")
+                return
+            self._apply_sleep_command(request)
+            return
+        if name in {"library", "offline"}:
+            if not self._showing_library:
+                self.action_show_library()
+            return
+        if name == "history":
+            if not self._showing_history:
+                self.action_show_history()
+            return
+        if name in {"playlists", "playlist"}:
+            if not self._showing_named_playlists:
+                self.action_show_playlists()
+            return
+        if name == "settings":
+            self.action_settings()
+            return
+        if name in {"theme", "themes"}:
+            self.action_change_theme()
+            return
+        if name in {"quit", "q"}:
+            self.exit()
+            return
+        if name in {"help", "?"}:
+            self.notify(
+                "sleep · library · history · playlists · settings · theme · quit",
+                title="Commands",
+            )
+            return
+        self.notify(f"Unknown command: {name or '(empty)'}", title="Command", severity="error")
+
+    def _apply_sleep_command(self, request: SleepCommand) -> None:
+        player = self.session.player
+        if request.mode == "status":
+            self.notify(self._sleep_status_description(), title="Sleep timer")
+            return
+        if request.mode == "cancel":
+            had_timer = self._sleep_deadline is not None or self._sleep_after_track
+            self._sleep_deadline = None
+            self._sleep_after_track = False
+            if player is not None:
+                player.cancel_hold_after_current()
+            self.notify(
+                "Cancelled" if had_timer else "No sleep timer is active",
+                title="Sleep timer",
+            )
+            self._refresh_now_playing_message()
+            return
+        if request.mode == "track":
+            if player is None or self.session.current_track is None:
+                self.notify(
+                    "Play a track before using 'sleep track'",
+                    title="Sleep timer",
+                    severity="warning",
+                )
+                return
+            player.cancel_hold_after_current()
+            player.hold_after_current()
+            self._sleep_deadline = None
+            self._sleep_after_track = True
+            self.notify("Playback will stop after this track", title="Sleep timer")
+            self._refresh_now_playing_message()
+            return
+        assert request.seconds is not None
+        if player is not None:
+            player.cancel_hold_after_current()
+        self._sleep_after_track = False
+        self._sleep_deadline = time.monotonic() + request.seconds
+        self.notify(
+            f"Playback will pause in {_format_sleep_remaining(request.seconds)}",
+            title="Sleep timer",
+        )
+        self._refresh_now_playing_message()
+
+    def _check_sleep_timer(self) -> None:
+        player = self.session.player
+        if (
+            self._sleep_after_track
+            and player is not None
+            and player.queue_held
+            and self.session.current_track is None
+        ):
+            self._sleep_after_track = False
+            self.notify("Current track finished", title="Sleep timer")
+            self._refresh_now_playing_message()
+            return
+        if self._sleep_deadline is None or time.monotonic() < self._sleep_deadline:
+            return
+        self._sleep_deadline = None
+        if player is not None and self.session.current_track is not None:
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                player.pause()
+        self.notify("Playback paused", title="Sleep timer")
+        self._refresh_now_playing_message()
+
+    def _sleep_status_description(self) -> str:
+        if self._sleep_after_track:
+            return "Playback will stop after the current track"
+        if self._sleep_deadline is None:
+            return "No sleep timer is active"
+        return (
+            "Playback will pause in "
+            f"{_format_sleep_remaining(self._sleep_deadline - time.monotonic())}"
+        )
+
+    def _sleep_indicator(self) -> str:
+        if self._sleep_after_track:
+            return "☾ after track"
+        if self._sleep_deadline is None:
+            return ""
+        return f"☾ {_format_sleep_remaining(self._sleep_deadline - time.monotonic())}"
+
+    def _now_playing_message(self, track: Track | None, state_symbol: str) -> str:
+        message = (
+            "○ Nothing playing"
+            if track is None
+            else f"{state_symbol} {_terminal_safe_title(track.title)}"
+        )
+        indicator = self._sleep_indicator()
+        return f"{message} · {indicator}" if indicator else message
+
+    def _refresh_now_playing_message(self) -> None:
+        if not self.query("#now-playing"):
+            return
+        track = self.session.current_track
+        symbol = "▶"
+        player = self.session.player
+        if player is not None and track is not None:
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                if player.status.state is PlaybackState.PAUSED:
+                    symbol = "Ⅱ"
+        self.query_one("#now-playing", Static).update(
+            self._now_playing_message(track, symbol)
+        )
 
     def action_show_history(self) -> None:
         if self._showing_history:
@@ -2885,6 +3096,10 @@ class AuenApp(App[None]):
 
     def action_next_track(self) -> None:
         if self.session.player is not None:
+            if self._sleep_after_track:
+                self._sleep_after_track = False
+                self.session.player.cancel_hold_after_current()
+                self.notify("Cancelled because you skipped the track", title="Sleep timer")
             self.session.player.skip()
 
     @on(Button.Pressed, "#next-track")
@@ -3135,6 +3350,85 @@ def _format_timestamp(seconds: float | None) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def _parse_sleep_command(value: str, *, now: datetime | None = None) -> SleepCommand:
+    """Parse status, cancellation, current-track, duration, and local clock forms."""
+    text = value.strip().casefold()
+    if text in {"", "status"}:
+        return SleepCommand("status")
+    if text in {"cancel", "off", "clear"}:
+        return SleepCommand("cancel")
+    if text in {"track", "current", "current track"}:
+        return SleepCommand("track")
+
+    if text.startswith("at "):
+        clock = text[3:].strip()
+        match = re.fullmatch(r"(\d{1,2}):(\d{2})\s*([ap]m)?", clock)
+        if match is None:
+            raise ValueError("Use 'sleep at HH:MM', for example 'sleep at 23:30'")
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        suffix = match.group(3)
+        if minute > 59 or (suffix is None and hour > 23) or (suffix and not 1 <= hour <= 12):
+            raise ValueError("That clock time is not valid")
+        if suffix:
+            hour = hour % 12 + (12 if suffix == "pm" else 0)
+        current = now or datetime.now().astimezone()
+        target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= current:
+            target += timedelta(days=1)
+        return _validated_sleep_duration((target - current).total_seconds())
+
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return _validated_sleep_duration(float(text) * 60)
+
+    if re.fullmatch(r"\d{1,3}:\d{2}(?::\d{2})?", text):
+        parts = [int(part) for part in text.split(":")]
+        if any(part > 59 for part in parts[1:]):
+            raise ValueError("Minutes and seconds must be below 60")
+        if len(parts) == 2:
+            hours, minutes = parts
+            seconds = hours * 3600 + minutes * 60
+        else:
+            hours, minutes, seconds_part = parts
+            seconds = hours * 3600 + minutes * 60 + seconds_part
+        return _validated_sleep_duration(float(seconds))
+
+    compact = re.sub(r"\s+", "", text)
+    matches = re.findall(r"(\d+(?:\.\d+)?)([hms])", compact)
+    if matches and "".join(f"{amount}{unit}" for amount, unit in matches) == compact:
+        multipliers = {"h": 3600, "m": 60, "s": 1}
+        duration_seconds = 0.0
+        for amount, unit in matches:
+            duration_seconds += float(amount) * multipliers[unit]
+        return _validated_sleep_duration(duration_seconds)
+
+    raise ValueError(
+        "Use minutes, 1h 20m, 1:30, 'track', 'cancel', or 'at 23:30'"
+    )
+
+
+def _validated_sleep_duration(seconds: float) -> SleepCommand:
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("Sleep duration must be greater than zero")
+    if seconds > _MAX_SLEEP_SECONDS:
+        raise ValueError("Sleep duration cannot exceed 7 days")
+    return SleepCommand("duration", seconds)
+
+
+def _format_sleep_remaining(seconds: float) -> str:
+    remaining = max(0, math.ceil(seconds))
+    if remaining < 60:
+        return f"{remaining}s"
+    hours, remainder = divmod(remaining, 3600)
+    minutes = math.ceil(remainder / 60)
+    if minutes == 60:
+        hours += 1
+        minutes = 0
+    if hours:
+        return f"{hours}h" if not minutes else f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 def _format_bytes(size_bytes: int) -> str:

@@ -8,11 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from rich.cells import cell_len
 from textual.containers import Horizontal
-from textual.widgets import Button, DataTable, Footer, Input, Label, Select
+from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
 from auen.app import (
     AuenApp,
     ClearHistoryScreen,
+    CommandScreen,
     DeleteOfflineScreen,
     DeletePlaylistScreen,
     DuplicateQueueScreen,
@@ -23,12 +24,15 @@ from auen.app import (
     SearchInput,
     SessionModeScreen,
     SettingsScreen,
+    SleepCommand,
     ThemeScreen,
     _emoji_safety_gutter,
     _format_bytes,
+    _format_sleep_remaining,
     _format_timestamp,
     _is_termux_environment,
     _merge_search_items,
+    _parse_sleep_command,
     _parse_timestamp,
     _stabilize_terminal_emoji,
     _terminal_safe_title,
@@ -58,6 +62,45 @@ def make_app(tmp_path: Path, *, mode: SessionMode) -> AuenApp:
         config,
         session=AuenSession(config, state=state, cache=cache, downloads=downloads),
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "seconds"),
+    [
+        ("30", 1800),
+        ("90m", 5400),
+        ("1h 20m", 4800),
+        ("1h20m", 4800),
+        ("1:30", 5400),
+        ("1:02:03", 3723),
+        ("45s", 45),
+    ],
+)
+def test_parse_sleep_duration_formats(value: str, seconds: float) -> None:
+    assert _parse_sleep_command(value) == SleepCommand("duration", seconds)
+
+
+def test_parse_sleep_clock_uses_next_local_occurrence() -> None:
+    now = datetime(2026, 10, 4, 23, 0, tzinfo=timezone.utc)
+
+    assert _parse_sleep_command("at 23:30", now=now) == SleepCommand("duration", 1800)
+    assert _parse_sleep_command("at 10:30pm", now=now) == SleepCommand(
+        "duration", 23.5 * 3600
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "200h", "8d", "1:99", "at 25:00", "forever"])
+def test_parse_sleep_rejects_invalid_or_oversized_values(value: str) -> None:
+    with pytest.raises(ValueError):
+        _parse_sleep_command(value)
+
+
+def test_sleep_status_commands_and_formatting() -> None:
+    assert _parse_sleep_command("") == SleepCommand("status")
+    assert _parse_sleep_command("cancel") == SleepCommand("cancel")
+    assert _parse_sleep_command("track") == SleepCommand("track")
+    assert _format_sleep_remaining(61) == "2m"
+    assert _format_sleep_remaining(3661) == "1h 2m"
 
 
 async def test_startup_asks_for_session_mode(tmp_path: Path) -> None:
@@ -609,6 +652,94 @@ def test_footer_hides_actions_already_shown_as_playback_buttons() -> None:
         assert not bindings[key].show
     for key in ("/", "d", "f2", "f3", "q"):
         assert bindings[key].show
+
+
+async def test_command_mode_schedules_reports_and_cancels_sleep_timer(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test() as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press(":")
+        assert isinstance(app.screen, CommandScreen)
+        command = app.screen.query_one("#command-input", Input)
+        command.value = "sleep 30m"
+        await pilot.press("enter")
+
+        assert app._sleep_deadline is not None
+        assert "☾ 30m" in str(app.query_one("#now-playing", Static).render())
+
+        app._execute_command("sleep cancel")
+        assert app._sleep_deadline is None
+        assert "☾" not in str(app.query_one("#now-playing", Static).render())
+
+
+async def test_colon_remains_ordinary_text_while_search_is_focused(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test() as pilot:
+        search = app.query_one("#search-bar", Input)
+        search.value = ""
+        search.focus()
+        await pilot.press(":")
+
+        assert not isinstance(app.screen, CommandScreen)
+        assert search.value == ":"
+
+
+async def test_sleep_deadline_pauses_without_consuming_queue(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(title="Sleepy", source=TrackSource.LOCAL, uri="/sleepy.opus")
+    player = MagicMock()
+    player.queue_held = False
+    app.session.player = player
+    app.session.current_track = track
+
+    async with app.run_test():
+        app._sleep_deadline = 0
+        app._check_sleep_timer()
+
+        player.pause.assert_called_once_with()
+        assert app._sleep_deadline is None
+        assert app.session.current_track is track
+
+
+async def test_sleep_track_arms_hold_and_skip_cancels_it(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(title="Sleepy", source=TrackSource.LOCAL, uri="/sleepy.opus")
+    player = MagicMock()
+    player.queue_held = False
+    app.session.player = player
+    app.session.current_track = track
+
+    async with app.run_test():
+        app._apply_sleep_command(SleepCommand("track"))
+        player.hold_after_current.assert_called_once_with()
+        assert app._sleep_after_track
+
+        app.action_next_track()
+        player.cancel_hold_after_current.assert_called()
+        player.skip.assert_called_once_with()
+        assert not app._sleep_after_track
+
+
+async def test_completed_sleep_track_clears_indicator_and_leaves_queue_held(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    player.queue_held = True
+    app.session.player = player
+    app.session.current_track = None
+
+    async with app.run_test():
+        app._sleep_after_track = True
+        app._check_sleep_timer()
+
+        assert not app._sleep_after_track
+        assert player.queue_held
+        assert "☾" not in str(app.query_one("#now-playing", Static).render())
 
 
 def test_saving_unchanged_settings_does_not_resend_volume(tmp_path: Path) -> None:

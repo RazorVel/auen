@@ -140,9 +140,12 @@ Settings. Offline mode should remain useful when the network is unavailable.
   unpin, and explicit deletion with confirmation.
 - Named playlists are durable ordered collections distinct from the transient playback
   queue. Tracks can be added from search, history, or the offline library.
-- A `:` command entry inside the TUI provides keyboard-compatible forms of the legacy
-  workflow, including search, URL, local file/directory import, play, pause, next, seek,
-  queue, history, library, playlist, shuffle, repeat, theme, settings, help, and quit.
+- A `:` command entry inside the TUI starts with sleep timers, view navigation, settings,
+  themes, help, and clean quitting. Later versions may extend the same dispatcher to search,
+  local import, playback, queue, shuffle, and repeat operations without crowding the footer.
+- Sleep timers accept minutes, compound durations, explicit local clock times, and an
+  after-current-track mode. Duration expiry pauses in place; after-track expiry holds the
+  remaining Queue until playback is resumed.
 - A pure prompt-oriented entry point may reuse the same command dispatcher; commands must
   call session services rather than duplicate playback or persistence logic.
 - Layout responds to terminal cell dimensions. Wide terminals may show results and queue

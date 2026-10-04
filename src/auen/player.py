@@ -43,6 +43,9 @@ class PlaybackController:
         self._lock = threading.Lock()
         self._current_track: Track | None = None
         self._skip_requested = threading.Event()
+        self._playback_enabled = threading.Event()
+        self._playback_enabled.set()
+        self._hold_after_current = threading.Event()
 
     def start(self) -> None:
         with self._lock:
@@ -58,6 +61,8 @@ class PlaybackController:
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
+            if not self._playback_enabled.wait(timeout=0.2):
+                continue
             track = self.playlist.next(timeout=0.2)
             if track is None:
                 continue
@@ -97,10 +102,13 @@ class PlaybackController:
                 self.playlist.mark_played(track)
                 self._report_error(track, playback_error)
                 self._set_current(None)
+                self._apply_pending_hold()
                 continue
             if ended or self._skip_requested.is_set():
                 self.playlist.complete(track)
             self._set_current(None)
+            if ended and not self._skip_requested.is_set():
+                self._apply_pending_hold()
 
     @property
     def current_track(self) -> Track | None:
@@ -120,8 +128,13 @@ class PlaybackController:
     def resume(self) -> None:
         if self.current_track is not None:
             self.backend.resume()
+        else:
+            self._playback_enabled.set()
 
     def toggle_pause(self) -> None:
+        if self.current_track is None and not self._playback_enabled.is_set():
+            self.resume()
+            return
         status = self.status
         if status.state is PlaybackState.PAUSED:
             self.resume()
@@ -129,9 +142,29 @@ class PlaybackController:
             self.pause()
 
     def skip(self) -> None:
+        self._hold_after_current.clear()
+        self._playback_enabled.set()
         if self.current_track is not None:
             self._skip_requested.set()
             self.backend.stop()
+
+    def hold_after_current(self) -> None:
+        """Finish the active track, then wait before consuming the queue."""
+        if self.current_track is None:
+            raise RuntimeError("nothing is playing")
+        self._hold_after_current.set()
+
+    def cancel_hold_after_current(self) -> None:
+        self._hold_after_current.clear()
+
+    @property
+    def queue_held(self) -> bool:
+        return not self._playback_enabled.is_set()
+
+    def _apply_pending_hold(self) -> None:
+        if self._hold_after_current.is_set():
+            self._hold_after_current.clear()
+            self._playback_enabled.clear()
 
     def seek(self, seconds: float) -> None:
         if not self.backend.supports_seek:

@@ -4,9 +4,9 @@
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Release — v0.4.0:** Core playback, responsive rendering, History, named playlists,
-> Offline media, anonymous-request cooldown, and shutdown behavior have been exercised with
-> `mpv` on Linux and a physical Termux device.
+> **Release — v0.5.0:** Core playback, responsive rendering, History, named playlists,
+> Offline media, command mode, sleep timers, anonymous-request cooldown, and shutdown
+> behavior have been exercised with `mpv` on Linux and a physical Termux device.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
@@ -14,7 +14,7 @@ size-limited persistent playback cache.
 
 ![auen in a narrow terminal](docs/assets/auen-narrow.svg)
 
-## What works in v0.4.0
+## What works in v0.5.0
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
@@ -39,9 +39,11 @@ size-limited persistent playback cache.
 - Get compact, view-specific key guidance at the bottom of the focused Results or Queue pane.
 - Preview and save themes, with an adaptive side-by-side or stacked phone-width layout.
 - Configure behavior through the TUI or scriptable `auen config` commands.
+- Open compact command mode with `:` for sleep timers, navigation, settings, themes, help,
+  and clean quitting. Duration timers pause in place; `sleep track` holds the remaining Queue.
 
-This is intentionally an early prototype. `:` command mode and local directory import are
-planned for later versions. auen deliberately does not use Google-account cookies; videos
+This is intentionally an early prototype. Local file and directory import is planned for a
+later version. auen deliberately does not use Google-account cookies; videos
 or networks that require authenticated YouTube access may therefore be unavailable. Request
 pacing can reduce bursts, but it cannot bypass a YouTube IP or account challenge.
 
@@ -66,7 +68,7 @@ pipx ensurepath
 Install the tagged prototype directly from GitHub:
 
 ```console
-pipx install 'git+https://github.com/razorvel/auen.git@v0.4.0'
+pipx install 'git+https://github.com/razorvel/auen.git@v0.5.0'
 auen doctor
 auen
 ```
@@ -89,7 +91,7 @@ Install [Termux](https://github.com/termux/termux-app#installation), then run:
 ```console
 pkg update
 pkg install python git mpv ffmpeg
-python -m pip install 'git+https://github.com/razorvel/auen.git@v0.4.0'
+python -m pip install 'git+https://github.com/razorvel/auen.git@v0.5.0'
 auen doctor
 auen
 ```
@@ -115,6 +117,7 @@ The real-device test sequence and expected limitations are recorded in
 | `h` | Open or leave Recently Played |
 | `p` | Open or leave named Playlists |
 | `l` | Open or leave Offline media |
+| `:` | Open command mode |
 | `s` | Save the selected track to a named playlist |
 | `e` | Append every track in the currently open named playlist to Queue |
 | `d` | Retain the selected result for offline playback |
@@ -147,6 +150,28 @@ unknown duration until first playback; mpv then discovers and saves it locally.
 Left and Right page through a long selected title. Leaving that row restores its title to
 the beginning. Playback seeking deliberately uses `[` and `]`, so arrow keys remain safe
 for tables and text fields.
+
+### Command mode and sleep timers
+
+Press `:` while Results or Queue is focused, type a command, and press Enter. Escape closes
+the command field without running anything. Search continues to accept `:` as ordinary text.
+
+| Command | Action |
+| --- | --- |
+| `sleep 30` | Pause playback in 30 minutes |
+| `sleep 1h 20m` | Pause after a combined duration |
+| `sleep 1:30` | Pause in 1 hour 30 minutes |
+| `sleep at 23:30` | Pause at the next occurrence of that local time |
+| `sleep track` | Finish the current track, then hold Queue playback |
+| `sleep` | Show the active timer |
+| `sleep cancel` | Cancel the active timer |
+| `library`, `history`, `playlists` | Open that view |
+| `settings`, `theme` | Open that screen |
+| `help`, `quit` | Show command help or quit auen |
+
+An active timer appears beside Now Playing. Duration timers pause the current track in place;
+Space resumes it. After-track timers preserve the remaining Queue, and Space starts its next
+track. Sleep timers intentionally do not survive quitting and restarting auen.
 
 Some terminals disagree with Textual about the rendered width of shaped Indic scripts,
 which can corrupt adjacent columns. auen transliterates only those script runs in table and
