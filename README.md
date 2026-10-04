@@ -4,10 +4,10 @@
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Release — v0.6.0:** Core playback, responsive rendering, History, named playlists,
-> Offline media, command mode, sleep timers, remote control, optional Android notification
-> actions, anonymous-request cooldown, and shutdown behavior have been exercised with `mpv`
-> on Linux and a physical Termux device.
+> **Release — v1.0.0:** The first stable release brings together core playback, responsive
+> rendering, History, named playlists, Offline media, command mode, sleep timers, remote
+> control, optional Android notification actions, anonymous-request cooldown, and reliable
+> shutdown behavior validated with `mpv` on Linux and a physical Termux device.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
@@ -39,7 +39,7 @@ borders while keeping playback, seeking, command mode, and the offline status st
 
 ![auen in Termux phone-width layout](docs/assets/auen-termux.svg)
 
-## What works in v0.6.0
+## What works in v1.0.0
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
@@ -69,10 +69,11 @@ borders while keeping playback, seeking, command mode, and the offline status st
 - Control a running instance through a private local socket. On Termux, optional notification
   actions provide Pause/Resume, Next, and Stop without replacing mpv as the audio backend.
 
-This is intentionally an early prototype whose next features are guided by real usage. auen
-deliberately does not use Google-account cookies; videos
-or networks that require authenticated YouTube access may therefore be unavailable. Request
-pacing can reduce bursts, but it cannot bypass a YouTube IP or account challenge.
+Version 1.0 establishes the current controls, persistent data, and Linux/Termux workflows as
+auen's stable core. Future features will continue to be guided by real usage. auen deliberately
+does not use Google-account cookies, so videos or networks that require authenticated YouTube
+access may be unavailable. Request pacing can reduce bursts, but it cannot bypass a YouTube IP
+or account challenge.
 
 ## Requirements
 
@@ -92,10 +93,10 @@ sudo apt install mpv pipx
 pipx ensurepath
 ```
 
-Install the tagged prototype directly from GitHub:
+Install the tagged release directly from GitHub:
 
 ```console
-pipx install 'git+https://github.com/razorvel/auen.git@v0.6.0'
+pipx install 'git+https://github.com/razorvel/auen.git@v1.0.0'
 auen doctor
 auen
 ```
@@ -118,7 +119,7 @@ Install [Termux](https://github.com/termux/termux-app#installation), then run:
 ```console
 pkg update
 pkg install python git mpv ffmpeg
-python -m pip install 'git+https://github.com/razorvel/auen.git@v0.6.0'
+python -m pip install 'git+https://github.com/razorvel/auen.git@v1.0.0'
 auen doctor
 auen
 ```

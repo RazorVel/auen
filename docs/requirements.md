@@ -7,7 +7,7 @@ implementation to preserve.
 ## Product
 
 auen is a full-screen, keyboard-first Textual audio player. Its interface should work in
-Unix terminals. The current prototype supports playback through `mpv` on Linux and
+Unix terminals. The stable release supports playback through `mpv` on Linux and
 Android/Termux. Playback backends advertise capabilities so additional platforms can be
 introduced without changing the queue, media, persistence, or UI layers.
 
