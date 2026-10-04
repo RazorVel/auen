@@ -13,7 +13,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from anyascii import anyascii
 from rich.cells import cell_len, chop_cells
@@ -52,7 +52,9 @@ from auen.models import (
     Track,
     TrackSource,
 )
+from auen.remote import RemoteControlServer
 from auen.session import AuenSession
+from auen.termux_notification import TermuxNotificationController
 
 _LOAD_MORE_KEY = "__load_more__"
 _STATE_KEY = "__state__"
@@ -1006,6 +1008,11 @@ class SettingsScreen(Screen[bool]):
             yield from self._switch_row(
                 "Scan folders recursively", "scan-recursive", self.config.scan_recursive
             )
+            yield from self._switch_row(
+                "Android playback notification",
+                "android-notification",
+                self.config.android_notification,
+            )
         yield Static(
             "Tab/Shift+Tab navigate · Ctrl+S save · Esc cancel",
             id="settings-guide",
@@ -1067,6 +1074,9 @@ class SettingsScreen(Screen[bool]):
         self.config.shuffle = self.query_one("#shuffle", Switch).value
         self.config.restore_session = self.query_one("#restore-session", Switch).value
         self.config.scan_recursive = self.query_one("#scan-recursive", Switch).value
+        self.config.android_notification = self.query_one(
+            "#android-notification", Switch
+        ).value
         self.config.validate()
 
     def _integer_value(self, selector: str, label: str) -> int:
@@ -1272,8 +1282,11 @@ class AuenApp(App[None]):
         self._settings_backend_before = self.config.backend
         self._settings_mode_before = self.config.session_mode
         self._settings_volume_before = self.config.volume
+        self._settings_notification_before = self.config.android_notification
         self._sleep_deadline: float | None = None
         self._sleep_after_track = False
+        self._remote_server: RemoteControlServer | None = None
+        self._android_notification: TermuxNotificationController | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1329,6 +1342,8 @@ class AuenApp(App[None]):
         self.call_after_refresh(self._sync_table_widths)
         self._refresh_queue()
         self._refresh_download_status()
+        self._start_remote_control()
+        self._configure_android_notification()
         self.set_interval(0.5, self._refresh_playback_status)
         if self.current_session_mode is SessionMode.ASK:
             self.push_screen(SessionModeScreen(), self._session_mode_selected)
@@ -1367,6 +1382,12 @@ class AuenApp(App[None]):
             self.query_one(selector, Button).label = label
 
     def on_unmount(self) -> None:
+        if self._android_notification is not None:
+            self._android_notification.close()
+            self._android_notification = None
+        if self._remote_server is not None:
+            self._remote_server.close()
+            self._remote_server = None
         with contextlib.suppress(Exception):
             self.session.close()
 
@@ -2402,6 +2423,72 @@ class AuenApp(App[None]):
         except (OSError, RuntimeError, ValueError) as exc:
             self.notify(str(exc), title="Playback unavailable", severity="error")
 
+    def _start_remote_control(self) -> None:
+        server = RemoteControlServer(
+            self.config.state_dir,
+            lambda command: self.call_from_thread(self._handle_remote_command, command),
+        )
+        try:
+            server.start()
+        except (OSError, RuntimeError) as exc:
+            self.notify(str(exc), title="Remote controls unavailable", severity="warning")
+            return
+        self._remote_server = server
+
+    def _configure_android_notification(self) -> None:
+        if self._android_notification is not None:
+            self._android_notification.close()
+            self._android_notification = None
+        if not self.config.android_notification or not _is_termux_environment():
+            return
+        controller = TermuxNotificationController()
+        if controller.available:
+            self._android_notification = controller
+
+    def _handle_remote_command(self, command: str) -> dict[str, Any]:
+        if command == "toggle":
+            self.action_toggle_playback()
+            return {"message": "Playback toggled"}
+        if command == "next":
+            self.action_next_track()
+            return {"message": "Skipping to next track"}
+        if command == "stop":
+            self.call_after_refresh(self.exit)
+            return {"message": "Stopping auen"}
+        if command == "status":
+            player = self.session.player
+            track = self.session.current_track
+            if track is None:
+                if player is not None and player.queue_held:
+                    return {"message": "Queue waiting", "state": "paused"}
+                return {"message": "Nothing playing", "state": "stopped"}
+            state = "playing"
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                state = player.status.state.name.lower() if player is not None else state
+            return {
+                "message": f"{state.capitalize()}: {track.title}",
+                "state": state,
+                "title": track.title,
+            }
+        raise ValueError(f"unsupported remote command: {command}")
+
+    def _refresh_android_notification(
+        self,
+        track: Track | None,
+        state: PlaybackState,
+    ) -> None:
+        controller = self._android_notification
+        if controller is None:
+            return
+        player = self.session.player
+        if track is None:
+            if player is not None and player.queue_held and self.session.playlist.queue_list:
+                controller.update("Queue waiting", playing=False)
+            else:
+                controller.clear()
+            return
+        controller.update(track.title, playing=state is PlaybackState.PLAYING)
+
     def _playback_track_changed(self, track: Track | None) -> None:
         if not self.is_running:
             return
@@ -2434,6 +2521,7 @@ class AuenApp(App[None]):
         player = self.session.player
         track = self.session.current_track
         if player is None or track is None:
+            self._refresh_android_notification(track, PlaybackState.STOPPED)
             self._reset_progress()
             return
         try:
@@ -2443,6 +2531,7 @@ class AuenApp(App[None]):
 
         elapsed = max(0.0, status.elapsed_seconds)
         state_symbol = "Ⅱ" if status.state is PlaybackState.PAUSED else "▶"
+        self._refresh_android_notification(track, status.state)
         self.query_one("#now-playing", Static).update(
             self._now_playing_message(track, state_symbol)
         )
@@ -3048,6 +3137,7 @@ class AuenApp(App[None]):
         self._settings_backend_before = self.config.backend
         self._settings_mode_before = self.config.session_mode
         self._settings_volume_before = self.config.volume
+        self._settings_notification_before = self.config.android_notification
         self.push_screen(SettingsScreen(self.config), self._settings_closed)
 
     def action_change_theme(self) -> None:
@@ -3085,6 +3175,8 @@ class AuenApp(App[None]):
                 title="Restart required",
                 severity="warning",
             )
+        if self.config.android_notification != self._settings_notification_before:
+            self._configure_android_notification()
 
     def action_toggle_playback(self) -> None:
         if self.session.player is not None:

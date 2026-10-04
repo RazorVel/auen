@@ -1,6 +1,6 @@
 # Termux validation checklist
 
-Version 0.5.0 has been exercised with the Termux `mpv` package on a physical Android device.
+Version 0.6.0 has been exercised with the Termux `mpv` package on a physical Android device.
 Use this checklist for release and regression validation.
 
 ## Before launching
@@ -9,6 +9,9 @@ Use this checklist for release and regression validation.
 2. In Termux, run `pkg update` and `pkg install python git mpv ffmpeg`.
 3. Install auen, then run `auen doctor`.
 4. Confirm the doctor reports mpv and the yt-dlp Python package as available.
+5. For optional notification controls, install the Termux:API companion app from the same
+   source as Termux, then run `pkg install termux-api`. Confirm `auen doctor` reports the
+   Android notification command.
 
 ## Playback and recovery
 
@@ -49,6 +52,23 @@ Use this checklist for release and regression validation.
    readable and no traceback appears.
 5. Focus Search and type `:`. Confirm it remains ordinary query text instead of opening
    command mode.
+
+## Android notification controls
+
+1. Start playback and move Termux to the background. Confirm an ongoing auen notification
+   shows the current title and Pause, Next, and Stop actions.
+2. Lock the phone and check whether those actions remain available on its lock screen. Some
+   Android lock-screen privacy settings may require expanding or unlocking the notification.
+3. Press Pause and Resume. Confirm the current track changes state without opening Termux.
+4. Press Next. Confirm auen advances through its Queue and records History normally.
+5. From another Termux session, run `auen remote status`, `toggle`, and `next`. Confirm they
+   control the existing TUI rather than launching another player.
+6. Press Stop in the notification. Confirm auen exits cleanly, audio stops, and the
+   notification disappears.
+7. Disable **Android playback notification** in F2 Settings. Confirm playback continues but
+   no notification is shown.
+8. Temporarily make Termux:API unavailable and confirm playback and clean shutdown still work
+   without a traceback.
 
 Record the Android version, Termux version, terminal dimensions, and any traceback when
 reporting a failure.

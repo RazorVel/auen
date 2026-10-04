@@ -146,6 +146,12 @@ Settings. Offline mode should remain useful when the network is unavailable.
 - Sleep timers accept minutes, compound durations, explicit local clock times, and an
   after-current-track mode. Duration expiry pauses in place; after-track expiry holds the
   remaining Queue until playback is resumed.
+- A private per-user local control channel exposes status, play/pause, next, and clean stop
+  commands to another shell process. Fixed command names and restrictive socket permissions
+  prevent it from becoming an arbitrary command-execution interface.
+- On Termux, optional notification actions call that control channel while mpv remains the
+  playback backend. Missing, slow, or broken Termux:API support must never block or terminate
+  playback, and users can disable the notification integration.
 - A pure prompt-oriented entry point may reuse the same command dispatcher; commands must
   call session services rather than duplicate playback or persistence logic.
 - Layout responds to terminal cell dimensions. Wide terminals may show results and queue

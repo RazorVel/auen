@@ -1,5 +1,6 @@
 """Tests for the Textual application shell and settings screen."""
 
+import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from rich.cells import cell_len
 from textual.containers import Horizontal
-from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
+from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static, Switch
 
 from auen.app import (
     AuenApp,
@@ -44,6 +45,7 @@ from auen.cache import CacheManager
 from auen.config import AuenConfig
 from auen.downloads import DownloadManager
 from auen.models import CollectionKind, MediaCollection, SessionMode, Track, TrackSource
+from auen.remote import send_remote_command
 from auen.session import AuenSession
 from auen.state import StateStore
 
@@ -133,6 +135,45 @@ async def test_settings_screen_saves_to_shared_config(tmp_path: Path) -> None:
 
         assert app.config.volume == 61
         assert (tmp_path / "config.toml").exists()
+
+
+async def test_settings_can_disable_android_notification(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test() as pilot:
+        await pilot.press("f2")
+        notification = app.screen.query_one("#android-notification", Switch)
+        notification.value = False
+        await pilot.click("#save")
+
+        assert app.config.android_notification is False
+
+
+async def test_remote_status_reaches_running_tui(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+
+    async with app.run_test():
+        response = await asyncio.to_thread(
+            send_remote_command,
+            app.config.state_dir,
+            "status",
+        )
+
+        assert response["message"] == "Nothing playing"
+        assert response["state"] == "stopped"
+
+
+async def test_remote_playback_commands_use_app_actions(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+
+    async with app.run_test():
+        app.session.player = player
+        assert app._handle_remote_command("toggle")["message"] == "Playback toggled"
+        assert app._handle_remote_command("next")["message"] == "Skipping to next track"
+
+        player.toggle_pause.assert_called_once_with()
+        player.skip.assert_called_once_with()
 
 
 async def test_search_result_can_be_selected_into_durable_queue(tmp_path: Path) -> None:

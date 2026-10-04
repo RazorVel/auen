@@ -13,11 +13,14 @@ from typing import TYPE_CHECKING, Any
 
 from auen import __version__
 from auen.config import AuenConfig
+from auen.remote import send_remote_command
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 SETTING_ALIASES = {
+    "android.notification": "android_notification",
+    "android.notification_controls": "android_notification",
     "cache.max_size": "cache_max_bytes",
     "cache.max_bytes": "cache_max_bytes",
     "cache.directory": "cache_dir",
@@ -59,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     reset_parser.add_argument("key")
 
     subparsers.add_parser("doctor", help="Check runtime dependencies and configuration")
+    remote_parser = subparsers.add_parser("remote", help="Control a running auen instance")
+    remote_parser.add_argument(
+        "remote_command",
+        choices=("toggle", "next", "stop", "status"),
+    )
     return parser
 
 
@@ -71,13 +79,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _handle_config(args)
         if args.command == "doctor":
             return _doctor()
+        if args.command == "remote":
+            return _handle_remote(args.remote_command)
         if args.command is None:
             return _launch_tui()
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"auen: {exc}", file=sys.stderr)
         return 2
 
     parser.print_help()
+    return 0
+
+
+def _handle_remote(command: str) -> int:
+    config = AuenConfig.load()
+    response = send_remote_command(config.state_dir, command)
+    message = response.get("message")
+    if isinstance(message, str) and message:
+        print(message)
     return 0
 
 
@@ -172,9 +191,14 @@ def _doctor() -> int:
         problems += 1
 
     termux = shutil.which("termux-media-player")
+    termux_notification = shutil.which("termux-notification")
     mpv = shutil.which("mpv")
     if mpv:
         print(f"[ok] mpv: {mpv} (preferred by automatic backend)")
+    if termux_notification:
+        print(f"[ok] Android notification controls: {termux_notification}")
+    else:
+        print("[info] Android notification controls are optional (Termux:API)")
     if termux:
         print(f"[ok] Termux media player: {termux}")
         volume = shutil.which("termux-volume")

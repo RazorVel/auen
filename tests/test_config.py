@@ -23,6 +23,7 @@ def test_config_defaults() -> None:
     assert config.restore_session is True
     assert config.scan_recursive is True
     assert config.theme == "textual-dark"
+    assert config.android_notification is True
     assert isinstance(config.cache_dir, Path)
     assert isinstance(config.config_dir, Path)
 
@@ -54,6 +55,7 @@ def test_config_load_from_toml(tmp_path: Path) -> None:
     # Defaults should remain for unconfigured values
     assert config.repeat_mode == "off"
     assert config.stream_first is True
+    assert config.android_notification is True
 
 
 def test_config_cli_overrides(tmp_path: Path) -> None:

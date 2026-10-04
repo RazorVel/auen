@@ -2,7 +2,7 @@
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from auen.cli import main
 
@@ -25,6 +25,14 @@ def test_config_accepts_human_readable_cache_size(tmp_path: Path, capsys: object
 
     output = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "cache_max_bytes=1610612736" in output
+
+
+def test_config_can_disable_android_notification(tmp_path: Path, capsys: object) -> None:
+    with patch("auen.config.user_config_dir", return_value=str(tmp_path)):
+        assert main(["config", "set", "android.notification", "false"]) == 0
+
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "android_notification=false" in output
 
 
 def test_config_rejects_unknown_setting(tmp_path: Path, capsys: object) -> None:
@@ -121,3 +129,32 @@ def test_doctor_reports_mpv_as_preferred_when_both_backends_exist(
     assert "mpv" in output
     assert "preferred by automatic backend" in output
     assert "Termux media player" in output
+
+
+def test_remote_command_contacts_running_instance(tmp_path: Path, capsys: object) -> None:
+    config = MagicMock(state_dir=tmp_path)
+    with (
+        patch("auen.cli.AuenConfig.load", return_value=config),
+        patch(
+            "auen.cli.send_remote_command",
+            return_value={"ok": True, "message": "Playback toggled"},
+        ) as send,
+    ):
+        assert main(["remote", "toggle"]) == 0
+
+    send.assert_called_once_with(tmp_path, "toggle")
+    assert "Playback toggled" in capsys.readouterr().out  # type: ignore[attr-defined]
+
+
+def test_remote_command_reports_missing_instance(tmp_path: Path, capsys: object) -> None:
+    config = MagicMock(state_dir=tmp_path)
+    with (
+        patch("auen.cli.AuenConfig.load", return_value=config),
+        patch(
+            "auen.cli.send_remote_command",
+            side_effect=RuntimeError("no running auen instance was found"),
+        ),
+    ):
+        assert main(["remote", "status"]) == 2
+
+    assert "no running auen instance" in capsys.readouterr().err  # type: ignore[attr-defined]

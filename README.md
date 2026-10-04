@@ -4,9 +4,10 @@
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Release — v0.5.0:** Core playback, responsive rendering, History, named playlists,
-> Offline media, command mode, sleep timers, anonymous-request cooldown, and shutdown
-> behavior have been exercised with `mpv` on Linux and a physical Termux device.
+> **Release — v0.6.0:** Core playback, responsive rendering, History, named playlists,
+> Offline media, command mode, sleep timers, remote control, optional Android notification
+> actions, anonymous-request cooldown, and shutdown behavior have been exercised with `mpv`
+> on Linux and a physical Termux device.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
@@ -14,7 +15,7 @@ size-limited persistent playback cache.
 
 ![auen in a narrow terminal](docs/assets/auen-narrow.svg)
 
-## What works in v0.5.0
+## What works in v0.6.0
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
@@ -41,9 +42,11 @@ size-limited persistent playback cache.
 - Configure behavior through the TUI or scriptable `auen config` commands.
 - Open compact command mode with `:` for sleep timers, navigation, settings, themes, help,
   and clean quitting. Duration timers pause in place; `sleep track` holds the remaining Queue.
+- Control a running instance through a private local socket. On Termux, optional notification
+  actions provide Pause/Resume, Next, and Stop without replacing mpv as the audio backend.
 
-This is intentionally an early prototype. Local file and directory import is planned for a
-later version. auen deliberately does not use Google-account cookies; videos
+This is intentionally an early prototype whose next features are guided by real usage. auen
+deliberately does not use Google-account cookies; videos
 or networks that require authenticated YouTube access may therefore be unavailable. Request
 pacing can reduce bursts, but it cannot bypass a YouTube IP or account challenge.
 
@@ -68,7 +71,7 @@ pipx ensurepath
 Install the tagged prototype directly from GitHub:
 
 ```console
-pipx install 'git+https://github.com/razorvel/auen.git@v0.5.0'
+pipx install 'git+https://github.com/razorvel/auen.git@v0.6.0'
 auen doctor
 auen
 ```
@@ -91,13 +94,39 @@ Install [Termux](https://github.com/termux/termux-app#installation), then run:
 ```console
 pkg update
 pkg install python git mpv ffmpeg
-python -m pip install 'git+https://github.com/razorvel/auen.git@v0.5.0'
+python -m pip install 'git+https://github.com/razorvel/auen.git@v0.6.0'
 auen doctor
 auen
 ```
 
 mpv is selected automatically and provides seeking, direct streaming, volume control, and
 precise position reporting. Termux:API is not required when mpv is installed.
+
+Optional Android notification controls require the
+[Termux:API companion app](https://github.com/termux/termux-api#installation) from the same
+source as Termux, then install its command package:
+
+```console
+pkg install termux-api
+```
+
+Termux and its companion apps must come from the same source because their signatures must
+match. auen continues to use mpv for audio; Termux:API is used only to display an ongoing
+notification with Pause/Resume, Next, and Stop actions. Disable it through **Android playback
+notification** in Settings or `auen config set android.notification false`.
+
+The same private local control channel is available from another Termux session:
+
+```console
+auen remote status
+auen remote toggle
+auen remote next
+auen remote stop
+```
+
+`stop` cleanly exits the running auen instance. Missing or unresponsive notification support
+never interrupts playback, and the local control socket is accessible only to the current
+Termux/Linux user.
 
 The real-device test sequence and expected limitations are recorded in
 [`docs/termux-testing.md`](docs/termux-testing.md).
