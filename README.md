@@ -11,9 +11,33 @@ size-limited persistent playback cache.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
-### Phone-width layout
+### Recently played
 
-![auen in a narrow terminal](docs/assets/auen-narrow.svg)
+History keeps the most recent play time and play count while exposing the same play, queue,
+offline, and playlist actions as the rest of auen.
+
+![Recently played history](docs/assets/auen-history.svg)
+
+### Named playlists
+
+Saved playlists retain their ordering and duplicates. Tracks can be played immediately,
+queued next, appended together, reordered, or saved into another playlist.
+
+![An opened named playlist](docs/assets/auen-playlist.svg)
+
+### Offline library
+
+The local-only library shows duration, file size, and whether each track is retained (`◆`)
+or belongs to the automatic size-limited cache (`○`).
+
+![Offline media library](docs/assets/auen-library.svg)
+
+### Termux layout
+
+On phone-width terminals, Results and Queue stack vertically. Termux uses stable ASCII pane
+borders while keeping playback, seeking, command mode, and the offline status strip visible.
+
+![auen in Termux phone-width layout](docs/assets/auen-termux.svg)
 
 ## What works in v0.6.0
 
