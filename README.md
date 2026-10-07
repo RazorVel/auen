@@ -1,5 +1,9 @@
 # auen
 
+<p align="center">
+  <img src="docs/assets/logo.png" alt="auen logo" width="220">
+</p>
+
 `auen` is a keyboard-first terminal audio player for Linux and Android/Termux. It uses a
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
