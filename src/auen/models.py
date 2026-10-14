@@ -86,6 +86,16 @@ class SavedPlaylist:
     track_count: int = 0
 
 
+@dataclass(slots=True, frozen=True)
+class PlaylistImportResult:
+    """Counts for an offline import that creates or merges a named playlist."""
+
+    playlist: SavedPlaylist
+    added: int
+    skipped: int
+    created: bool
+
+
 @dataclass(slots=True)
 class MediaCollection:
     title: str

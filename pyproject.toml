@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "auen"
-version = "1.0.0"
+version = "1.1.0"
 description = "A terminal audio player with YouTube search, streaming, and caching"
 readme = "README.md"
 license = "MIT"
@@ -15,6 +15,7 @@ classifiers = [
     "Environment :: Console",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Multimedia :: Sound/Audio :: Players",

@@ -13,6 +13,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from anyascii import anyascii
@@ -67,6 +68,7 @@ class SleepCommand:
 
     mode: str
     seconds: float | None = None
+
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -425,20 +427,30 @@ class PlaylistNameScreen(ModalScreen[str | None]):
     }
     """
 
-    def __init__(self, title: str, action_label: str, *, initial_name: str = "") -> None:
+    def __init__(
+        self,
+        title: str,
+        action_label: str,
+        *,
+        initial_name: str = "",
+        placeholder: str = "Playlist name",
+        max_length: int = 80,
+    ) -> None:
         super().__init__()
         self.dialog_title = title
         self.action_label = action_label
         self.initial_name = initial_name
+        self.placeholder = placeholder
+        self.max_length = max_length
 
     def compose(self) -> ComposeResult:
         with Vertical(id="playlist-name-dialog"):
             yield Label(self.dialog_title, classes="dialog-title")
             yield Input(
                 value=self.initial_name,
-                placeholder="Playlist name",
+                placeholder=self.placeholder,
                 id="playlist-name-input",
-                max_length=80,
+                max_length=self.max_length,
             )
             with Horizontal(id="playlist-name-actions"):
                 yield Button("Cancel", id="cancel-playlist-name")
@@ -474,6 +486,101 @@ class PlaylistNameScreen(ModalScreen[str | None]):
     def cancel_pressed(self) -> None:
         self.dismiss(None)
 
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class PlaylistExportScreen(ModalScreen[tuple[str, bool] | None]):
+    """Choose selected/all scope and a destination for a track-list export."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    PlaylistExportScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #playlist-export-dialog {
+        width: 70;
+        max-width: 100%;
+        height: auto;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #playlist-export-scope, #playlist-export-path {
+        margin-top: 1;
+    }
+    #playlist-export-actions {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #playlist-export-actions Button {
+        margin-left: 1;
+    }
+    PlaylistExportScreen.termux-safe #playlist-export-dialog {
+        border: ascii $accent;
+    }
+    """
+
+    def __init__(self, selected_name: str | None, count: int) -> None:
+        super().__init__()
+        self.selected_name = selected_name
+        self.count = count
+        safe_name = re.sub(r"[^\w.-]+", "-", selected_name or "playlist").strip("-.")
+        self.suggested = {
+            False: f"{safe_name or 'playlist'}.auen.json",
+            True: "auen-playlists.auen.json",
+        }
+
+    def compose(self) -> ComposeResult:
+        all_selected = self.selected_name is None
+        choices = [(f"All playlists ({self.count})", True)]
+        if self.selected_name is not None:
+            choices.insert(0, (f"Selected: {self.selected_name}", False))
+        with Vertical(id="playlist-export-dialog"):
+            yield Label("Export playlist track lists", classes="dialog-title")
+            yield Static("Choose one playlist or all. Audio files are not included.")
+            yield Select(
+                choices, value=all_selected, allow_blank=False, id="playlist-export-scope",
+            )
+            yield Input(
+                value=self.suggested[all_selected], id="playlist-export-path", max_length=4096,
+            )
+            with Horizontal(id="playlist-export-actions"):
+                yield Button("Cancel", id="cancel-playlist-export")
+                yield Button("Export", id="confirm-playlist-export", variant="primary")
+
+    def on_mount(self) -> None:
+        self.set_class(_is_termux_environment(), "termux-safe")
+        self.query_one("#playlist-export-path", Input).focus()
+
+    @on(Select.Changed, "#playlist-export-scope")
+    def scope_changed(self, event: Select.Changed) -> None:
+        if event.value is Select.BLANK or not self.query("#playlist-export-path"):
+            return
+        field = self.query_one("#playlist-export-path", Input)
+        if field.value in self.suggested.values():
+            field.value = self.suggested[bool(event.value)]
+
+    def _submit(self) -> None:
+        path = self.query_one("#playlist-export-path", Input).value.strip()
+        if not path:
+            self.notify("Enter a file path", title="Path required", severity="warning")
+            return
+        export_all = bool(self.query_one("#playlist-export-scope", Select).value)
+        self.dismiss((path, export_all))
+
+    @on(Input.Submitted, "#playlist-export-path")
+    def path_submitted(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#confirm-playlist-export")
+    def export_pressed(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel-playlist-export")
     def action_cancel(self) -> None:
         self.dismiss(None)
 
@@ -1110,6 +1217,8 @@ class AuenApp(App[None]):
         Binding("a", "enqueue_history", "Add history track", show=False),
         Binding("c", "clear_history", "Clear history", show=False),
         Binding("r", "rename_playlist", "Rename playlist", show=False),
+        Binding("i", "import_playlist", "Import playlist", show=False),
+        Binding("x", "export_playlist", "Export playlist", show=False),
         Binding("d", "download_selected", "↓ Offline"),
         Binding("delete", "remove_queued", "Del Remove"),
         Binding("f2", "settings", "⚙ Settings"),
@@ -2201,10 +2310,12 @@ class AuenApp(App[None]):
         elif self._active_named_playlist is not None:
             results_text = (
                 "Enter play · Home next · a queue · d offline · e queue all · s save · "
-                "Shift+↑/↓ move · Del remove · Esc back"
+                "x export · Shift+↑/↓ move · Del remove · Esc back"
             )
         elif self._showing_named_playlists:
-            results_text = "Enter open · c create · r rename · Del delete · Esc back"
+            results_text = (
+                "Enter open · c create · r rename · i import · x export · Del delete · Esc back"
+            )
         elif self._showing_history:
             results_text = (
                 "Enter play · Home next · a queue · d offline · s save · "
@@ -2841,7 +2952,7 @@ class AuenApp(App[None]):
         self._search_loading = False
         self._show_named_playlists()
         self.notify(
-            "Enter open · c create · r rename · Del delete · s add track · Esc back",
+            "Enter open · c create · r rename · i import · x export · Del delete · Esc back",
             title="Named playlists",
         )
 
@@ -2872,6 +2983,103 @@ class AuenApp(App[None]):
             PlaylistPickerScreen(playlists),
             lambda playlist_id: self._playlist_picked_for_track(track, playlist_id),
         )
+
+    def action_import_playlist(self) -> None:
+        if (
+            not self._showing_named_playlists
+            or not self.query_one("#results", DataTable).has_focus
+        ):
+            return
+        self.push_screen(
+            PlaylistNameScreen(
+                "Import playlist track list",
+                "Import",
+                max_length=4096,
+                placeholder="Path to an auen playlist JSON file",
+            ),
+            lambda path: self._playlist_transfer_requested("import", path, None),
+        )
+
+    def action_export_playlist(self) -> None:
+        if (
+            not self._showing_named_playlists
+            or not self.query_one("#results", DataTable).has_focus
+        ):
+            return
+        playlist = self._active_named_playlist or self._selected_named_playlist()
+        self.push_screen(
+            PlaylistExportScreen(
+                playlist.name if playlist is not None else None,
+                len(self.session.named_playlists()),
+            ),
+            lambda choice: self._playlist_export_chosen(choice, playlist),
+        )
+
+    def _playlist_export_chosen(
+        self, choice: tuple[str, bool] | None, playlist: SavedPlaylist | None,
+    ) -> None:
+        if choice is None:
+            return
+        path, export_all = choice
+        self._playlist_transfer_requested(
+            "export_all" if export_all else "export", path,
+            playlist.playlist_id if playlist is not None else None,
+        )
+
+    def _playlist_transfer_requested(
+        self,
+        operation: str,
+        raw_path: str | None,
+        playlist_id: int | None,
+    ) -> None:
+        if raw_path is not None:
+            self._transfer_playlist_file(operation, raw_path, playlist_id)
+
+    @work(thread=True)
+    def _transfer_playlist_file(
+        self,
+        operation: str,
+        raw_path: str | None,
+        playlist_id: int | None,
+    ) -> None:
+        if raw_path is None:
+            return
+        path = Path(raw_path.strip().removeprefix('"').removesuffix('"')).expanduser()
+        try:
+            if operation == "import":
+                results = self.session.import_named_playlists(path)
+                if results:
+                    self.call_from_thread(
+                        self._show_named_playlists,
+                        cursor_playlist_id=results[0].playlist.playlist_id,
+                    )
+                message = (
+                    f"Imported {len(results)} playlists "
+                    f"({sum(item.added for item in results)} added, "
+                    f"{sum(item.skipped for item in results)} skipped)"
+                )
+            elif operation == "export_all":
+                destination = self.session.export_all_named_playlists(path)
+                message = f"Saved all playlist track lists to {destination}"
+            else:
+                if playlist_id is None:
+                    return
+                destination = self.session.export_named_playlist(playlist_id, path)
+                message = f"Saved track list to {destination}"
+        except FileExistsError:
+            self.call_from_thread(
+                self.notify,
+                "Choose a new filename; existing files are not overwritten",
+                title="Playlist export",
+                severity="warning",
+            )
+            return
+        except (OSError, ValueError) as exc:
+            self.call_from_thread(
+                self.notify, str(exc), title="Playlist transfer", severity="error"
+            )
+            return
+        self.call_from_thread(self.notify, message, title="Playlist transfer")
 
     def action_enqueue_playlist(self) -> None:
         results = self.query_one("#results", DataTable)
@@ -3158,10 +3366,7 @@ class AuenApp(App[None]):
         self.session.cache.max_cache_bytes = self.config.cache_max_bytes
         self.session.cache.prune()
         self.session.prune_recent_history()
-        if (
-            self.session.player is not None
-            and self.config.volume != self._settings_volume_before
-        ):
+        if self.session.player is not None and self.config.volume != self._settings_volume_before:
             self.session.player.set_volume(self.config.volume)
         self.session.save()
         restart_changes: list[str] = []
@@ -3496,9 +3701,7 @@ def _parse_sleep_command(value: str, *, now: datetime | None = None) -> SleepCom
             duration_seconds += float(amount) * multipliers[unit]
         return _validated_sleep_duration(duration_seconds)
 
-    raise ValueError(
-        "Use minutes, 1h 20m, 1:30, 'track', 'cancel', or 'at 23:30'"
-    )
+    raise ValueError("Use minutes, 1h 20m, 1:30, 'track', 'cancel', or 'at 23:30'")
 
 
 def _validated_sleep_duration(seconds: float) -> SleepCommand:
@@ -3601,8 +3804,7 @@ def _emoji_safety_gutter(value: str) -> int:
     emoji_codepoints = sum(
         1
         for character in value
-        if "\U0001f000" <= character <= "\U0001faff"
-        or "\u2600" <= character <= "\u27bf"
+        if "\U0001f000" <= character <= "\U0001faff" or "\u2600" <= character <= "\u27bf"
     )
     combining_marks = sum(
         1 for character in value if unicodedata.category(character).startswith("M")

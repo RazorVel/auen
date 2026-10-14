@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from auen.backends.base import AudioBackend, BackendCapabilities
+from auen.backends.windows_pipe import WindowsPipe
 from auen.models import PlaybackState, PlaybackStatus
 
 
@@ -19,7 +20,9 @@ class MpvBackend(AudioBackend):
     """mpv backend using JSON IPC socket for control."""
 
     def __init__(self) -> None:
+        self._windows = os.name == "nt"
         self._socket_path = Path(tempfile.gettempdir()) / f"auen-mpv-{os.getpid()}-{id(self)}.sock"
+        self._pipe_name = rf"\\.\pipe\auen-mpv-{os.getpid()}-{id(self)}"
         self._process: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
         self._current_volume = 80
@@ -42,23 +45,25 @@ class MpvBackend(AudioBackend):
                 "--cache-pause-initial=yes",
                 "--cache-pause-wait=3",
                 "--demuxer-readahead-secs=30",
-                f"--input-ipc-server={self._socket_path}",
+                f"--input-ipc-server={self._pipe_name if self._windows else self._socket_path}",
                 "--quiet",
+                "--",
                 uri,
             ]
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=0x08000000 if self._windows else 0,
             )
 
             # Wait for socket
-            start = time.time()
-            while not self._socket_path.exists():
+            start = time.monotonic()
+            while not self._ipc_ready():
                 if self._process.poll() is not None:
                     self._process = None
                     raise RuntimeError("mpv exited before its control socket became available")
-                if time.time() - start > 5:
+                if time.monotonic() - start > 5:
                     self._kill_process()
                     raise RuntimeError("mpv socket didn't appear in time.")
                 time.sleep(0.1)
@@ -71,6 +76,15 @@ class MpvBackend(AudioBackend):
 
             self.set_volume(self._current_volume)
 
+    def _ipc_ready(self) -> bool:
+        if not self._windows:
+            return self._socket_path.exists()
+        try:
+            with WindowsPipe(self._pipe_name):
+                return True
+        except OSError:
+            return False
+
     def _monitor_process(self, process: subprocess.Popen[bytes]) -> None:
         process.wait()
         with self._lock:
@@ -81,6 +95,8 @@ class MpvBackend(AudioBackend):
                 self._remove_socket()
 
     def _remove_socket(self) -> None:
+        if self._windows:
+            return
         if self._socket_path.exists():
             with contextlib.suppress(OSError):
                 self._socket_path.unlink()
@@ -97,38 +113,49 @@ class MpvBackend(AudioBackend):
         self._remove_socket()
 
     def _send_command(self, command: list[Any]) -> dict[str, Any]:
-        if not self._socket_path.exists():
+        if not self._windows and not self._socket_path.exists():
             return {"error": "no socket"}
 
         try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            if self._windows:
+                with WindowsPipe(self._pipe_name) as pipe:
+                    return self._exchange_command(pipe, command)
+            family = getattr(socket, "AF_UNIX", None)
+            if family is None:
+                raise RuntimeError("Unix IPC is unavailable on this platform")
+            with socket.socket(family, socket.SOCK_STREAM) as s:
                 s.settimeout(2.0)
                 s.connect(str(self._socket_path))
-                req = json.dumps({"command": command}) + "\n"
-                s.sendall(req.encode("utf-8"))
-
-                data = b""
-                max_response_bytes = 1024 * 1024
-                while b"\n" not in data:
-                    chunk = s.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                    if len(data) > max_response_bytes:
-                        raise RuntimeError("mpv IPC response exceeded 1 MiB")
-
-                if not data:
-                    return {}
-
-                lines = data.decode("utf-8").splitlines()
-                for line in lines:
-                    if line.strip():
-                        resp = json.loads(line)
-                        if "event" not in resp:
-                            return dict(resp)
-            return {}
+                return self._exchange_command(s, command)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, RuntimeError) as exc:
             return {"error": str(exc)}
+
+    @staticmethod
+    def _exchange_command(
+        connection: socket.socket | WindowsPipe, command: list[Any]
+    ) -> dict[str, Any]:
+        connection.sendall((json.dumps({"command": command}) + "\n").encode("utf-8"))
+        data = bytearray()
+        total = 0
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            chunk = connection.recv(4096)
+            if not chunk:
+                return {}
+            data.extend(chunk)
+            total += len(chunk)
+            if total > 1024 * 1024:
+                raise RuntimeError("mpv IPC response exceeded 1 MiB")
+            while b"\n" in data:
+                line, _, remainder = data.partition(b"\n")
+                data = bytearray(remainder)
+                if line.strip():
+                    response = json.loads(line.decode("utf-8"))
+                    if not isinstance(response, dict):
+                        raise RuntimeError("mpv IPC response must be a JSON object")
+                    if "event" not in response:
+                        return response
+        raise TimeoutError("mpv control channel did not respond in time")
 
     def pause(self) -> None:
         if self._process:

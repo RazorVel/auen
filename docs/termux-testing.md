@@ -1,6 +1,6 @@
 # Termux validation checklist
 
-Version 1.0.0 has been exercised with the Termux `mpv` package on a physical Android device.
+Version 1.1.0 has been exercised with the Termux `mpv` package on a physical Android device.
 Use this checklist for release and regression validation.
 
 ## Before launching

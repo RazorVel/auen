@@ -19,6 +19,7 @@ from auen.app import (
     DeletePlaylistScreen,
     DuplicateQueueScreen,
     LoadMoreScreen,
+    PlaylistExportScreen,
     PlaylistNameScreen,
     PlaylistPickerScreen,
     QueuePlaylistScreen,
@@ -45,6 +46,7 @@ from auen.cache import CacheManager
 from auen.config import AuenConfig
 from auen.downloads import DownloadManager
 from auen.models import CollectionKind, MediaCollection, SessionMode, Track, TrackSource
+from auen.playlist_transfer import export_playlist, read_playlist, read_playlists
 from auen.remote import send_remote_command
 from auen.session import AuenSession
 from auen.state import StateStore
@@ -64,6 +66,105 @@ def make_app(tmp_path: Path, *, mode: SessionMode) -> AuenApp:
         config,
         session=AuenSession(config, state=state, cache=cache, downloads=downloads),
     )
+
+
+async def test_playlist_transfer_dialogs_export_merge_cancel_and_keep_playback(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    first = Track(title="One", source=TrackSource.YOUTUBE, uri="https://youtube.com/watch?v=one")
+    second = Track(title="Two", source=TrackSource.YOUTUBE, uri="https://youtube.com/watch?v=two")
+    playlist = app.session.create_named_playlist("Road trip")
+    app.session.add_to_named_playlist(playlist.playlist_id, first)
+    incoming = export_playlist("Road trip", [first, second], tmp_path / "incoming.json")
+    destination = tmp_path / "exported.json"
+    async with app.run_test() as pilot:
+        app.session.current_track = first
+        app.session.enqueue(second)
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("p", "x")
+        assert isinstance(app.screen, PlaylistExportScreen)
+        app.screen.query_one("#playlist-export-path", Input).value = str(destination)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        assert read_playlist(destination).tracks[0].uri == first.uri
+        await pilot.press("i", "escape")
+        assert len(app.session.named_playlist_tracks(playlist.playlist_id)) == 1
+        await pilot.press("i")
+        app.screen.query_one("#playlist-name-input", Input).value = str(incoming)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        assert app._selected_named_playlist().playlist_id == playlist.playlist_id
+        assert [
+            track.uri for track in app.session.named_playlist_tracks(playlist.playlist_id)
+        ] == [
+            first.uri,
+            second.uri,
+        ]
+        assert len(app.session.named_playlists()) == 1
+        assert app.session.current_track is first
+        assert app.session.playlist.queue_list == [second]
+        await pilot.press("/", "i", "x")
+        assert "ix" in app.query_one("#search-bar", Input).value
+        assert not isinstance(app.screen, PlaylistNameScreen)
+
+
+async def test_imported_playlist_reuses_existing_offline_media(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(
+        title="Cached", source=TrackSource.YOUTUBE, uri="https://youtube.com/watch?v=cached"
+    )
+    media = app.session.cache.destination_for(track)
+    media.write_bytes(b"cached")
+    app.session.cache.register(track, media)
+    incoming = export_playlist("Offline", [track], tmp_path / "offline.json")
+    async with app.run_test():
+        result = app.session.import_named_playlist(incoming)
+        imported = app.session.named_playlist_tracks(result.playlist.playlist_id)[0]
+        assert imported.cached_path is None
+        assert app._availability_symbol(imported) == "✓"
+        assert imported.cached_path == media
+
+
+async def test_export_all_choice_imports_every_playlist_and_cancels_cleanly(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    first = app.session.create_named_playlist("One")
+    app.session.create_named_playlist("Empty")
+    track = Track(title="Track", source=TrackSource.YOUTUBE, uri="https://youtube.com/watch?v=track")
+    app.session.add_to_named_playlist(first.playlist_id, track)
+    destination = tmp_path / "all.json"
+    async with app.run_test(size=(60, 30)) as pilot:
+        app.query_one("#results", DataTable).focus()
+        await pilot.press("p", "x")
+        assert isinstance(app.screen, PlaylistExportScreen)
+        assert app.screen.query_one("#playlist-export-dialog").region.right <= app.size.width
+        app.screen.query_one("#playlist-export-scope", Select).value = True
+        await pilot.pause()
+        assert (
+            app.screen.query_one("#playlist-export-path", Input).value
+            == "auen-playlists.auen.json"
+        )
+        app.screen.query_one("#playlist-export-path", Input).value = str(destination)
+        await pilot.press("escape")
+        assert not destination.exists()
+        await pilot.press("x")
+        app.screen.query_one("#playlist-export-scope", Select).value = True
+        app.screen.query_one("#playlist-export-path", Input).value = str(destination)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        documents = read_playlists(destination)
+        assert [item.name for item in documents] == ["Empty", "One"]
+        assert documents[1].tracks[0].uri == track.uri
+        app.session.delete_named_playlist(first.playlist_id)
+        await pilot.press("i")
+        app.screen.query_one("#playlist-name-input", Input).value = str(destination)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        assert [item.name for item in app.session.named_playlists()] == ["Empty", "One"]
+        restored = next(item for item in app.session.named_playlists() if item.name == "One")
+        assert app.session.named_playlist_tracks(restored.playlist_id)[0].uri == track.uri
 
 
 @pytest.mark.parametrize(
@@ -1504,9 +1605,9 @@ async def test_named_playlists_remain_contained_when_resized(tmp_path: Path) -> 
         for width, height in ((120, 35), (55, 25), (200, 35)):
             await pilot.resize_terminal(width, height)
             await pilot.pause()
-            assert sum(column.get_render_width(table) for column in table.ordered_columns) <= (
-                table.size.width - 1
-            )
+            assert sum(
+                column.get_render_width(table) for column in table.ordered_columns
+            ) <= (table.size.width - 1)
 
         wide_title = str(table.get_cell(f"playlist:{playlist.playlist_id}", "title"))
         assert "→" not in wide_title
@@ -1565,9 +1666,9 @@ async def test_history_and_named_playlist_show_cache_status(tmp_path: Path) -> N
             assert table.get_cell(f"{cached.track_id}:0", "status") == "✓"
             assert table.get_cell(f"{downloading.track_id}:1", "status") == "↓"
             assert table.get_cell(f"{streaming.track_id}:2", "status") == "↗"
-            assert sum(
-                column.get_render_width(table) for column in table.ordered_columns
-            ) <= (table.size.width - 1)
+            assert sum(column.get_render_width(table) for column in table.ordered_columns) <= (
+                table.size.width - 1
+            )
 
 
 async def test_open_named_playlist_can_append_every_track_in_order(tmp_path: Path) -> None:

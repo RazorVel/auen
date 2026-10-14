@@ -1,5 +1,6 @@
 """Tests for mpv backend."""
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,10 +14,12 @@ from auen.models import PlaybackState
 @patch("subprocess.Popen")
 @patch("pathlib.Path.exists")
 @patch("threading.Thread")
+@patch("auen.backends.mpv.MpvBackend._send_command", return_value={"error": "success"})
 def test_mpv_play_starts_process(
-    mock_thread: MagicMock, mock_exists: MagicMock, mock_popen: MagicMock
+    _mock_command: MagicMock, mock_thread: MagicMock, mock_exists: MagicMock, mock_popen: MagicMock
 ) -> None:
     backend = MpvBackend()
+    backend._windows = False
 
     # Simulate socket exists after wait
     mock_exists.return_value = True
@@ -38,6 +41,7 @@ def test_mpv_play_starts_process(
 
 @patch("socket.socket")
 @patch("pathlib.Path.exists")
+@pytest.mark.skipif(os.name == "nt", reason="Unix socket command transport")
 def test_mpv_pause_resume(mock_exists: MagicMock, mock_socket: MagicMock) -> None:
     backend = MpvBackend()
     backend._process = MagicMock()
@@ -61,6 +65,7 @@ def test_mpv_pause_resume(mock_exists: MagicMock, mock_socket: MagicMock) -> Non
 
 @patch("socket.socket")
 @patch("pathlib.Path.exists", return_value=True)
+@pytest.mark.skipif(os.name == "nt", reason="Unix socket command transport")
 def test_mpv_ipc_uses_newline_terminated_json(
     _mock_exists: MagicMock, mock_socket: MagicMock
 ) -> None:
@@ -147,3 +152,46 @@ def test_detect_backend_nothing(mock_which: MagicMock) -> None:
 def test_detect_backend_rejects_unknown_preference() -> None:
     with pytest.raises(ValueError, match="Unsupported audio backend"):
         detect_backend("vlc")
+
+
+def test_windows_play_uses_named_pipe_and_hides_console() -> None:
+    backend = MpvBackend()
+    backend._windows = True
+    with (
+        patch("auen.backends.mpv.WindowsPipe") as pipe,
+        patch("subprocess.Popen") as process,
+        patch("threading.Thread"),
+    ):
+        process.return_value.poll.return_value = None
+        pipe.return_value.__enter__.return_value.recv.return_value = b'{"error":"success"}\n'
+        backend.play(r"C:\Music\song with spaces.mp3")
+        assert f"--input-ipc-server={backend._pipe_name}" in process.call_args.args[0]
+        assert process.call_args.kwargs["creationflags"] == 0x08000000
+        assert pipe.call_count >= 2
+        backend.stop()
+
+
+def test_windows_ipc_reads_split_events_and_response() -> None:
+    backend = MpvBackend()
+    backend._windows = True
+    with patch("auen.backends.mpv.WindowsPipe") as pipe:
+        connection = pipe.return_value.__enter__.return_value
+        connection.recv.side_effect = [
+            b'{"event":"start-file"}\n',
+            b'{"data":',
+            b'42,"error":"success"}\n',
+        ]
+        assert backend._send_command(["get_property", "time-pos"])["data"] == 42
+        assert connection.sendall.call_args.args[0].endswith(b"\n")
+
+
+def test_windows_ipc_timeout_and_malformed_response_are_reported() -> None:
+    backend = MpvBackend()
+    backend._windows = True
+    with patch("auen.backends.mpv.WindowsPipe") as pipe:
+        connection = pipe.return_value.__enter__.return_value
+        connection.recv.side_effect = TimeoutError("pipe timed out")
+        assert "timed out" in backend._send_command(["get_property", "pause"])["error"]
+        connection.recv.side_effect = None
+        connection.recv.return_value = b"[]\n"
+        assert "JSON object" in backend._send_command(["get_property", "pause"])["error"]

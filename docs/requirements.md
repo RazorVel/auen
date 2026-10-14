@@ -161,3 +161,10 @@ Settings. Offline mode should remain useful when the network is unavailable.
 - Responsive behavior is tested at desktop and phone-sized terminal dimensions. Unicode
   decoration must have a plain-text fallback or remain understandable when a glyph is
   unavailable.
+
+## Deferred controls
+
+- System-wide keyboard shortcuts for play, pause, next, previous, and stop, usable while
+  another application has focus. Reuse the remote-control channel; previous-track behavior
+  needs its own playback/queue design. This is a later feature, separate from the Windows
+  compatibility and playlist import/export batch.

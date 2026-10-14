@@ -12,7 +12,15 @@ from typing import Any
 
 from platformdirs import user_state_dir
 
-from auen.models import HistoryEntry, RepeatMode, SavedPlaylist, Track, TrackSource
+from auen.models import (
+    HistoryEntry,
+    PlaylistImportResult,
+    RepeatMode,
+    SavedPlaylist,
+    Track,
+    TrackSource,
+)
+from auen.playlist_transfer import track_source_key
 
 
 @dataclass(slots=True)
@@ -127,6 +135,61 @@ class StateStore:
             )
             for row in rows
         ]
+
+    def import_named_playlist(self, name: str, tracks: list[Track]) -> PlaylistImportResult:
+        """Merge by name and source identity, keeping the whole change transactional."""
+        return self.import_named_playlists([(name, tracks)])[0]
+
+    def import_named_playlists(
+        self, playlists: list[tuple[str, list[Track]]],
+    ) -> list[PlaylistImportResult]:
+        """Apply a complete bundle atomically, using the single-playlist merge rules."""
+        normalized = [(_playlist_name(name), tracks) for name, tracks in playlists]
+        with self._lock, self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            return [self._merge_named_playlist(name, tracks) for name, tracks in normalized]
+
+    def _merge_named_playlist(self, name: str, tracks: list[Track]) -> PlaylistImportResult:
+        # Caller holds the store lock and owns the surrounding transaction.
+        existing = self._connection.execute(
+            "SELECT id, name FROM saved_playlists WHERE name = ? COLLATE NOCASE",
+            (name,),
+        ).fetchone()
+        if existing is None:
+            cursor = self._connection.execute(
+                "INSERT INTO saved_playlists(name) VALUES (?)", (name,),
+            )
+            playlist_id = cursor.lastrowid
+            if playlist_id is None:
+                raise RuntimeError("playlist was created without an identifier")
+            previous: list[Track] = []
+            additions = tracks
+        else:
+            playlist_id = int(existing["id"])
+            name = str(existing["name"])
+            previous = self.load_named_playlist_tracks(playlist_id)
+            seen = {track_source_key(track) for track in previous}
+            additions = []
+            for track in tracks:
+                key = track_source_key(track)
+                if key not in seen:
+                    additions.append(track)
+                    seen.add(key)
+        self._connection.executemany(
+            "INSERT INTO saved_playlist_items(playlist_id, position, track) VALUES (?, ?, ?)",
+            [
+                (playlist_id, position, _encode_track(track))
+                for position, track in enumerate(additions, start=len(previous))
+            ],
+        )
+        if additions:
+            self._touch_named_playlist(playlist_id)
+        return PlaylistImportResult(
+            SavedPlaylist(int(playlist_id), name, len(previous) + len(additions)),
+            len(additions),
+            len(tracks) - len(additions),
+            existing is None,
+        )
 
     def rename_named_playlist(self, playlist_id: int, name: str) -> bool:
         """Rename a playlist while preserving its identity and order."""

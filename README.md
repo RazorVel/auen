@@ -4,14 +4,13 @@
   <img src="docs/assets/logo.png" alt="auen logo" width="220">
 </p>
 
-`auen` is a keyboard-first terminal audio player for Linux and Android/Termux. It uses a
+`auen` is a keyboard-first terminal audio player for Linux, Windows, and Android/Termux. It uses a
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Release — v1.0.0:** The first stable release brings together core playback, responsive
-> rendering, History, named playlists, Offline media, command mode, sleep timers, remote
-> control, optional Android notification actions, anonymous-request cooldown, and reliable
-> shutdown behavior validated with `mpv` on Linux and a physical Termux device.
+> **Release — v1.1.0:** Windows playback and remote control, plus offline playlist track-list
+> import/export for one or all named playlists. Automated checks pass on Linux; manual
+> functionality checks pass on Linux, a physical Termux device, and Windows Terminal with mpv.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
 
@@ -43,7 +42,7 @@ borders while keeping playback, seeking, command mode, and the offline status st
 
 ![auen in Termux phone-width layout](docs/assets/auen-termux.svg)
 
-## What works in v1.0.0
+## What works in v1.1.0
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
@@ -57,6 +56,8 @@ borders while keeping playback, seeking, command mode, and the offline status st
 - Create, rename, delete, open, reorder, and play durable named playlists. Add tracks from
   search results, History, Queue, or another named playlist, or append a whole playlist to
   Queue in saved order.
+- Export one or all named playlists as offline JSON track lists. Import either format;
+  merge matching playlist names, skip existing sources, and append new tracks in order.
 - See streaming, downloading, and offline availability directly in Queue, History, and an
   opened named playlist.
 - Open Offline media with `l`; filter locally without a network connection, inspect duration
@@ -73,7 +74,7 @@ borders while keeping playback, seeking, command mode, and the offline status st
 - Control a running instance through a private local socket. On Termux, optional notification
   actions provide Pause/Resume, Next, and Stop without replacing mpv as the audio backend.
 
-Version 1.0 establishes the current controls, persistent data, and Linux/Termux workflows as
+Version 1.0 established the current controls, persistent data, and Linux/Termux workflows as
 auen's stable core. Future features will continue to be guided by real usage. auen deliberately
 does not use Google-account cookies, so videos or networks that require authenticated YouTube
 access may be unavailable. Request pacing can reduce bursts, but it cannot bypass a YouTube IP
@@ -82,7 +83,7 @@ or account challenge.
 ## Requirements
 
 - Python 3.10 or newer
-- Linux with `mpv`, or Android with Termux and its `mpv` package
+- Linux or Windows with `mpv`, or Android with Termux and its `mpv` package
 - Network access for YouTube search and streaming
 
 `pipx` is recommended on Linux because it keeps auen and its Python dependencies in an
@@ -100,7 +101,7 @@ pipx ensurepath
 Install the tagged release directly from GitHub:
 
 ```console
-pipx install 'git+https://github.com/razorvel/auen.git@v1.0.0'
+pipx install 'git+https://github.com/razorvel/auen.git@v1.1.0'
 auen doctor
 auen
 ```
@@ -116,6 +117,30 @@ auen doctor
 auen
 ```
 
+## Install on Windows
+
+Use Python 3.10 or newer and a Windows terminal such as Windows Terminal. Install a Windows
+mpv build listed on the [mpv installation page](https://mpv.io/installation/), and make sure
+`mpv.exe` is on `PATH`. In PowerShell, install auen into a virtual environment:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install "https://github.com/razorvel/auen/archive/refs/tags/v1.1.0.zip"
+.\.venv\Scripts\auen.exe --version
+.\.venv\Scripts\auen.exe doctor
+.\.venv\Scripts\auen.exe
+```
+
+Playback control uses mpv's Windows named pipe. `auen remote status`, `toggle`, `next`, and
+`stop` work from another terminal using an authenticated connection bound only to loopback.
+Linux and Termux continue to use their private Unix socket. Android notification controls
+remain specific to Termux. Paths for settings, saved state, and cached media follow the
+operating system's user directories.
+
+The [Windows validation checklist](docs/windows-testing.md) covers installation, playback,
+remote control, persistence, rendering, and playlist transfer. The automated test workflow
+includes Windows and Linux, plus a native mpv IPC check that does not require a sound device.
+
 ## Prepare Termux for testing
 
 Install [Termux](https://github.com/termux/termux-app#installation), then run:
@@ -123,7 +148,7 @@ Install [Termux](https://github.com/termux/termux-app#installation), then run:
 ```console
 pkg update
 pkg install python git mpv ffmpeg
-python -m pip install 'git+https://github.com/razorvel/auen.git@v1.0.0'
+python -m pip install 'git+https://github.com/razorvel/auen.git@v1.1.0'
 auen doctor
 auen
 ```
@@ -194,6 +219,41 @@ In Playlists, `c` creates, `r` renames, Delete removes with confirmation, and En
 playlist. Inside one, Enter plays now, Home plays next, `a` appends to Queue,
 `e` confirms and appends the entire playlist, Shift+Up/Down reorders, Delete removes a
 track, and Escape returns to the playlist list.
+
+### Offline playlist import and export
+
+In the playlist list, press `x`, then choose **Selected playlist** or **All playlists** in
+the export dialog. `x` also works inside an opened playlist. Enter a destination file path;
+Escape cancels. **All playlists** puts every named playlist, including empty playlists,
+into one file. Press `i` to import either a single-playlist file or a multi-playlist bundle.
+Exports use a versioned UTF-8 JSON format and refuse to overwrite existing files.
+
+The CLI provides the same operations, including an optional imported name:
+
+```console
+auen playlist list
+auen playlist export "Favorites" favorites.auen.json
+auen playlist export --all auen-playlists.auen.json
+auen playlist import favorites.auen.json
+auen playlist import auen-playlists.auen.json
+auen playlist import favorites.auen.json --name "Travel"
+```
+
+Export preserves track order, duplicates, titles, sources, and durations. A new playlist
+imports them in the saved order. If the name already exists, import merges into that
+playlist: existing rows remain unchanged, matching sources are skipped, and new sources
+are appended in file order. Alternate YouTube links to the same video count as the same
+source, even when their titles differ. Tracks with identical titles but different YouTube
+video IDs remain distinct. The result reports how many tracks were added and skipped.
+
+These operations require no network connection. Audio files are **not** included. Imported
+tracks can play offline when their media is already available in auen's local cache; local
+file entries keep their original paths, which must exist on the destination device. Otherwise
+YouTube tracks require streaming or a separate download. Cache paths, transient streaming
+URLs, and internal identifiers are omitted from exports. Invalid imports leave existing
+playlists unchanged. Bundle import validates every playlist before writing and applies the
+entire bundle in one transaction. `--name` is available only for files containing exactly
+one playlist.
 
 Availability symbols are consistent across Queue, Recently Played, and opened playlists:
 `✓` is available offline, `↓` is downloading, and `↗` will stream.

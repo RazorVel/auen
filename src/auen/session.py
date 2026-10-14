@@ -11,6 +11,7 @@ from auen.media.youtube import YouTubeService, is_youtube_url
 from auen.models import (
     HistoryEntry,
     MediaCollection,
+    PlaylistImportResult,
     RepeatMode,
     SavedPlaylist,
     SearchItem,
@@ -20,12 +21,19 @@ from auen.models import (
 )
 from auen.player import PlaybackController
 from auen.playlist import Playlist
+from auen.playlist_transfer import (
+    PlaylistDocument,
+    export_playlist,
+    export_playlists,
+    read_playlists,
+)
 from auen.state import SessionSnapshot, StateStore
 from auen.youtube_policy import YouTubeRequestGate
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from concurrent.futures import Future
+    from pathlib import Path
 
     from auen.backends.base import AudioBackend
     from auen.config import AuenConfig
@@ -147,8 +155,7 @@ class AuenSession:
         self.playlist.add_many(tracks)
         self.save()
         return [
-            self._auto_cache_executor.submit(self._cache_queued_track, track)
-            for track in pending
+            self._auto_cache_executor.submit(self._cache_queued_track, track) for track in pending
         ]
 
     def recent_history(self) -> list[HistoryEntry]:
@@ -168,6 +175,32 @@ class AuenSession:
 
     def named_playlists(self) -> list[SavedPlaylist]:
         return self.state.list_named_playlists()
+
+    def export_named_playlist(self, playlist_id: int, destination: Path) -> Path:
+        playlist = next(
+            (item for item in self.named_playlists() if item.playlist_id == playlist_id), None
+        )
+        if playlist is None:
+            raise ValueError("playlist no longer exists")
+        return export_playlist(playlist.name, self.named_playlist_tracks(playlist_id), destination)
+
+    def import_named_playlist(self, source: Path) -> PlaylistImportResult:
+        documents = read_playlists(source)
+        if len(documents) != 1:
+            raise ValueError("expected one playlist; use bundle import for this file")
+        document = documents[0]
+        return self.state.import_named_playlist(document.name, document.tracks)
+
+    def export_all_named_playlists(self, destination: Path) -> Path:
+        documents = [
+            PlaylistDocument(item.name, self.named_playlist_tracks(item.playlist_id))
+            for item in self.named_playlists()
+        ]
+        return export_playlists(documents, destination)
+
+    def import_named_playlists(self, source: Path) -> list[PlaylistImportResult]:
+        documents = read_playlists(source)
+        return self.state.import_named_playlists([(item.name, item.tracks) for item in documents])
 
     def rename_named_playlist(self, playlist_id: int, name: str) -> bool:
         return self.state.rename_named_playlist(playlist_id, name)

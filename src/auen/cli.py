@@ -13,7 +13,14 @@ from typing import TYPE_CHECKING, Any
 
 from auen import __version__
 from auen.config import AuenConfig
+from auen.playlist_transfer import (
+    PlaylistDocument,
+    export_playlist,
+    export_playlists,
+    read_playlists,
+)
 from auen.remote import send_remote_command
+from auen.state import StateStore
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -67,6 +74,20 @@ def build_parser() -> argparse.ArgumentParser:
         "remote_command",
         choices=("toggle", "next", "stop", "status"),
     )
+    playlist_parser = subparsers.add_parser(
+        "playlist", help="Import or export offline track lists"
+    )
+    playlist_commands = playlist_parser.add_subparsers(dest="playlist_command", required=True)
+    playlist_commands.add_parser("list", help="List named playlists and identifiers")
+    export_parser = playlist_commands.add_parser("export", help="Export a playlist as JSON")
+    export_parser.add_argument(
+        "playlist", nargs="?", help="Exact playlist name or numeric identifier"
+    )
+    export_parser.add_argument("path", type=Path)
+    export_parser.add_argument("--all", action="store_true", help="Export all named playlists")
+    import_parser = playlist_commands.add_parser("import", help="Import or merge a JSON playlist")
+    import_parser.add_argument("path", type=Path)
+    import_parser.add_argument("--name", help="Override the name stored in the file")
     return parser
 
 
@@ -81,6 +102,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _doctor()
         if args.command == "remote":
             return _handle_remote(args.remote_command)
+        if args.command == "playlist":
+            return _handle_playlist(args)
         if args.command is None:
             return _launch_tui()
     except (OSError, RuntimeError, ValueError) as exc:
@@ -88,6 +111,60 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     parser.print_help()
+    return 0
+
+
+def _handle_playlist(args: argparse.Namespace) -> int:
+    config = AuenConfig.load()
+    with StateStore(config.state_dir / "state.sqlite3") as state:
+        if args.playlist_command == "import":
+            documents = read_playlists(args.path)
+            if args.name is not None and len(documents) != 1:
+                raise ValueError("--name requires a file containing exactly one playlist")
+            results = state.import_named_playlists(
+                [(args.name or item.name, item.tracks) for item in documents]
+            )
+            for result in results:
+                print(
+                    f'Imported into "{result.playlist.name}" '
+                    f"({result.added} added, {result.skipped} skipped)"
+                )
+            if not results:
+                print("No playlists to import")
+        else:
+            playlists = state.list_named_playlists()
+            if args.playlist_command == "list":
+                for item in playlists:
+                    print(f"{item.playlist_id}\t{item.name}\t{item.track_count} tracks")
+                return 0
+            if args.all:
+                if args.playlist is not None:
+                    raise ValueError("choose a playlist or --all, not both")
+                documents = [
+                    PlaylistDocument(item.name, state.load_named_playlist_tracks(item.playlist_id))
+                    for item in playlists
+                ]
+                destination = export_playlists(documents, args.path)
+                print(f"Exported {len(documents)} playlists to {destination}")
+                return 0
+            if args.playlist is None:
+                raise ValueError("specify a playlist name or use --all")
+            selected = next(
+                (item for item in playlists if item.name.casefold() == args.playlist.casefold()),
+                None,
+            )
+            if selected is None:
+                selected = next(
+                    (item for item in playlists if str(item.playlist_id) == args.playlist), None
+                )
+            if selected is None:
+                raise ValueError(f"playlist not found: {args.playlist}")
+            destination = export_playlist(
+                selected.name,
+                state.load_named_playlist_tracks(selected.playlist_id),
+                args.path,
+            )
+            print(f'Exported "{selected.name}" to {destination}')
     return 0
 
 
