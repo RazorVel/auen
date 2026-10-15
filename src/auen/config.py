@@ -14,7 +14,7 @@ from auen.models import RepeatMode, SessionMode
 if sys.version_info >= (3, 11):
     import tomllib
 else:
-    import tomli as tomllib  # type: ignore[import-not-found]
+    import tomli as tomllib
 
 
 @dataclass

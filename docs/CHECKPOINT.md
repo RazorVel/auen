@@ -11,6 +11,18 @@ Check GitHub's Linux/Windows CI afterward; tagging and publication are not autho
 
 ## Current release preparation
 
+- Release commit `d4919a2` was pushed to origin/master before the user requested a pause.
+  Its GitHub Actions run `38704439997` completed: Linux/Python 3.14 passed; both Windows jobs
+  failed the mpv availability check, and Linux/Python 3.10 failed strict type checking.
+- Resume fixes: explicitly export Chocolatey's installed mpv directory through GITHUB_PATH;
+  remove the now-unused tomli import suppression and include typed tomli in development
+  dependencies on all Python versions, since mypy targets the minimum supported Python 3.10.
+  The unused suppression was reproduced locally with typed tomli available. Raw GitHub logs
+  require authentication here; Windows PATH behavior was checked against the package's
+  published install script. Follow-up CI must verify the actual runners.
+  Local focused configuration/CLI regression: 27 passed. Ruff clean; strict type checks
+  pass for Linux (30 files including preview generator) and win32 (29 package files),
+  with typed tomli installed. No playback policy or recovery behavior changed.
 - User accepted the recommendation to retain the tested companion 0.6.0-prototype APK
   unchanged. Python version is now 1.2.0; the independent native version remains 0.6.0.
 - Rechecked: `/tmp/auen-android-build.ypveNy` and its signing key are gone, as is the old
@@ -321,6 +333,21 @@ Check GitHub's Linux/Windows CI afterward; tagging and publication are not autho
 3. Commit and push the reviewed batch (authorized), then confirm GitHub's Linux/Windows CI.
    Tagging needs further approval and release publication remains user-owned. No user data,
    installed player, window-manager routing, or phone app was changed here.
+
+## Deferred playback/network report — after CI
+
+User report on Windows, possibly cross-platform: starting without the working VPN/network
+route can produce persistent playback failures. Auen then advances through every queued track
+until Queue is empty. Reconnecting and adding tracks may leave playback stuck, including
+after restarting; quitting eventually returns the shell but takes a long time.
+
+This report is queued for a separate troubleshooting/hardening pass, not implemented as part
+of the CI repair. Reproduce with controlled network/preparation failures; distinguish a true
+YouTube access block from OS/network permission failures. Investigate queue consumption,
+recovery after connectivity returns, persisted state, and bounded shutdown of in-flight work.
+The user prefers preserving the failed track/Queue and not skipping automatically by default.
+Observed symptoms are not a confirmed root cause. Do not tag/publish while this work is pending
+without resolving the release scope with the user.
 
 ## Resume
 

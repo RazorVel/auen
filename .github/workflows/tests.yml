@@ -27,7 +27,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y mpv
       - name: Install mpv (Windows)
         if: runner.os == 'Windows'
-        run: choco install mpvio --yes --no-progress
+        run: |
+          choco install mpvio --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Chocolatey updates machine PATH, not the runner's inherited environment.
+          $mpvDirectory = Join-Path $env:ChocolateyInstall 'lib\mpvio.install\tools'
+          if (-not (Test-Path (Join-Path $mpvDirectory 'mpv.exe'))) {
+            throw "mpv executable not found in $mpvDirectory"
+          }
+          $mpvDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Install Python dependencies (Linux)
         if: runner.os == 'Linux'
         run: python -m pip install -e '.[dev,linux]'
