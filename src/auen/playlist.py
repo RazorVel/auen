@@ -5,15 +5,22 @@ import threading
 import time
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from auen.models import RepeatMode, Track
+
+
+@dataclass
+class _QueuedTrack:
+    track: Track
+    priority: bool = False
 
 
 class Playlist:
     """Thread-safe track queue with history, shuffle, and loop."""
 
     def __init__(self) -> None:
-        self._queue: deque[Track] = deque()
+        self._queue: deque[_QueuedTrack] = deque()
         self._history: list[Track] = []
         self._lock = threading.Lock()
         self._available = threading.Event()
@@ -22,19 +29,25 @@ class Playlist:
 
     def add(self, track: Track) -> None:
         with self._lock:
-            self._queue.append(track)
+            self._queue.append(_QueuedTrack(track))
             self._available.set()
 
     def add_next(self, track: Track) -> None:
         """Place a track at the head of the queue."""
+        self.add_next_many([track])
+
+    def add_next_many(self, tracks: Iterable[Track]) -> None:
+        """Prepend a navigation sequence that also takes precedence over shuffle."""
+        entries = [_QueuedTrack(track, priority=True) for track in tracks]
         with self._lock:
-            self._queue.appendleft(track)
-            self._available.set()
+            self._queue.extendleft(reversed(entries))
+            if entries:
+                self._available.set()
 
     def add_many(self, tracks: Iterable[Track]) -> None:
         with self._lock:
             for track in tracks:
-                self._queue.append(track)
+                self._queue.append(_QueuedTrack(track))
             if self._queue:
                 self._available.set()
 
@@ -54,10 +67,15 @@ class Playlist:
                     continue
 
                 if self.shuffle and len(self._queue) > 1:
-                    idx = random.randrange(len(self._queue))
+                    idx = next(
+                        (i for i, entry in enumerate(self._queue) if entry.priority),
+                        None,
+                    )
+                    if idx is None:
+                        idx = random.randrange(len(self._queue))
                     self._queue[0], self._queue[idx] = self._queue[idx], self._queue[0]
 
-                track = self._queue.popleft()
+                track = self._queue.popleft().track
                 if not self._queue:
                     self._available.clear()
 
@@ -67,7 +85,7 @@ class Playlist:
         with self._lock:
             if not self._queue:
                 return None
-            return self._queue[0]
+            return self._queue[0].track
 
     def skip(self) -> Track | None:
         """Remove and return the current head without waiting."""
@@ -75,7 +93,7 @@ class Playlist:
             if not self._queue:
                 return None
 
-            track = self._queue.popleft()
+            track = self._queue.popleft().track
             if not self._queue:
                 self._available.clear()
             return track
@@ -87,7 +105,7 @@ class Playlist:
 
             # Since deque doesn't support pop(index), we do it manually
             # O(N) is fine for a music queue
-            track = self._queue[index]
+            track = self._queue[index].track
             del self._queue[index]
 
             if not self._queue:
@@ -100,10 +118,11 @@ class Playlist:
             if index < 0 or index >= len(self._queue):
                 return None
 
-            track = self._queue[index]
+            entry = self._queue[index]
             del self._queue[index]
-            self._queue.appendleft(track)
-            return track
+            entry.priority = True
+            self._queue.appendleft(entry)
+            return entry.track
 
     def move(self, index: int, delta: int) -> int | None:
         """Move a queued track by a relative number of positions."""
@@ -123,16 +142,16 @@ class Playlist:
         with self._lock:
             self._history.append(track)
 
-    def complete(self, track: Track) -> None:
+    def complete(self, track: Track, *, skipped: bool = False) -> None:
         """Record a finished track and apply the active repeat behavior atomically."""
         with self._lock:
             self._history.append(track)
 
-            if self.repeat_mode is RepeatMode.ONE:
-                self._queue.appendleft(track)
+            if self.repeat_mode is RepeatMode.ONE and not skipped:
+                self._queue.appendleft(_QueuedTrack(track, priority=True))
                 self._available.set()
             elif self.repeat_mode is RepeatMode.ALL and not self._queue:
-                self._queue.extend(self._history)
+                self._queue.extend(_QueuedTrack(item) for item in self._history)
                 self._history.clear()
                 self._available.set()
 
@@ -140,7 +159,7 @@ class Playlist:
         """If loop is on, move history back to queue."""
         with self._lock:
             if self.repeat_mode is RepeatMode.ALL and self._history:
-                self._queue.extend(self._history)
+                self._queue.extend(_QueuedTrack(item) for item in self._history)
                 self._history.clear()
                 self._available.set()
 
@@ -156,7 +175,7 @@ class Playlist:
     def restore(self, queue: Iterable[Track], history: Iterable[Track]) -> None:
         """Atomically replace queue and history from a persisted session."""
         with self._lock:
-            self._queue = deque(queue)
+            self._queue = deque(_QueuedTrack(track) for track in queue)
             self._history = list(history)
             if self._queue:
                 self._available.set()
@@ -166,7 +185,7 @@ class Playlist:
     @property
     def queue_list(self) -> list[Track]:
         with self._lock:
-            return list(self._queue)
+            return [entry.track for entry in self._queue]
 
     @property
     def history_list(self) -> list[Track]:

@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import unicodedata
@@ -39,8 +40,10 @@ from textual.widgets import (
 )
 from textual.widgets.data_table import CellDoesNotExist
 
+from auen.android_media import AndroidMediaBridge, media_identity
 from auen.backends import detect_backend
 from auen.config import AuenConfig
+from auen.desktop_media import NO_TRACK, MediaSnapshot, desktop_track_identity
 from auen.models import (
     CollectionKind,
     HistoryEntry,
@@ -53,7 +56,7 @@ from auen.models import (
     Track,
     TrackSource,
 )
-from auen.remote import RemoteControlServer
+from auen.remote import InstanceLock, RemoteControlServer
 from auen.session import AuenSession
 from auen.termux_notification import TermuxNotificationController
 
@@ -77,6 +80,8 @@ if TYPE_CHECKING:
 
     from auen.backends.base import AudioBackend
     from auen.cache import CacheEntry
+    from auen.linux_media import LinuxMediaControls
+    from auen.windows_media import WindowsMediaControls
 
 
 class SearchInput(Input):
@@ -1120,6 +1125,11 @@ class SettingsScreen(Screen[bool]):
                 "android-notification",
                 self.config.android_notification,
             )
+            yield from self._switch_row(
+                "Android headphone controls (APK)",
+                "android-media-controls",
+                self.config.android_media_controls,
+            )
         yield Static(
             "Tab/Shift+Tab navigate · Ctrl+S save · Esc cancel",
             id="settings-guide",
@@ -1184,6 +1194,9 @@ class SettingsScreen(Screen[bool]):
         self.config.android_notification = self.query_one(
             "#android-notification", Switch
         ).value
+        self.config.android_media_controls = self.query_one(
+            "#android-media-controls", Switch
+        ).value
         self.config.validate()
 
     def _integer_value(self, selector: str, label: str) -> int:
@@ -1204,6 +1217,7 @@ class AuenApp(App[None]):
         Binding("/", "focus_search", "⌕ Search"),
         Binding("space", "toggle_playback", "▶/Ⅱ Play", show=False),
         Binding("n", "next_track", "» Next", show=False),
+        Binding("b", "previous_track", "« Previous", show=False),
         Binding("[", "seek_backward", "← 10s", show=False),
         Binding("]", "seek_forward", "10s →", show=False),
         Binding("g", "go_to_time", "↪ Time", show=False),
@@ -1339,6 +1353,9 @@ class AuenApp(App[None]):
         background: $boost;
         text-style: bold;
     }
+    #play-pause {
+        min-width: 14;
+    }
     """
 
     def __init__(
@@ -1392,10 +1409,17 @@ class AuenApp(App[None]):
         self._settings_mode_before = self.config.session_mode
         self._settings_volume_before = self.config.volume
         self._settings_notification_before = self.config.android_notification
+        self._settings_media_controls_before = self.config.android_media_controls
         self._sleep_deadline: float | None = None
         self._sleep_after_track = False
         self._remote_server: RemoteControlServer | None = None
         self._android_notification: TermuxNotificationController | None = None
+        self._android_media_bridge: AndroidMediaBridge | None = None
+        self._media_companion_connected = False
+        self._notification_suppressed_for_media = False
+        self._linux_media: LinuxMediaControls | None = None
+        self._linux_media_task: asyncio.Task[None] | None = None
+        self._windows_media: WindowsMediaControls | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1432,6 +1456,9 @@ class AuenApp(App[None]):
                 yield Button(
                     "» Next  n", id="next-track", classes="playback-control", compact=True
                 )
+                yield Button(
+                    "« Prev  b", id="previous-track", classes="playback-control", compact=True
+                )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1453,6 +1480,9 @@ class AuenApp(App[None]):
         self._refresh_download_status()
         self._start_remote_control()
         self._configure_android_notification()
+        self._configure_android_media_bridge()
+        self._start_linux_media_controls()
+        self._start_windows_media_controls()
         self.set_interval(0.5, self._refresh_playback_status)
         if self.current_session_mode is SessionMode.ASK:
             self.push_screen(SessionModeScreen(), self._session_mode_selected)
@@ -1477,6 +1507,7 @@ class AuenApp(App[None]):
                 "#seek-forward": "+10s ]",
                 "#jump-time": "Jump g",
                 "#next-track": "Next n",
+                "#previous-track": "Prev b",
             }
             if narrow or _is_termux_environment()
             else {
@@ -1485,12 +1516,24 @@ class AuenApp(App[None]):
                 "#seek-forward": "10s →  ]",
                 "#jump-time": "↪ Jump  g",
                 "#next-track": "» Next  n",
+                "#previous-track": "« Prev  b",
             }
         )
         for selector, label in labels.items():
             self.query_one(selector, Button).label = label
 
     def on_unmount(self) -> None:
+        if self._windows_media is not None:
+            self._windows_media.close()
+            self._windows_media = None
+        if self._linux_media_task is not None:
+            self._linux_media_task.cancel()
+        if self._linux_media is not None:
+            self._linux_media.close()
+            self._linux_media = None
+        if self._android_media_bridge is not None:
+            self._android_media_bridge.close()
+            self._android_media_bridge = None
         if self._android_notification is not None:
             self._android_notification.close()
             self._android_notification = None
@@ -2550,19 +2593,236 @@ class AuenApp(App[None]):
         if self._android_notification is not None:
             self._android_notification.close()
             self._android_notification = None
+        self._notification_suppressed_for_media = False
         if not self.config.android_notification or not _is_termux_environment():
             return
         controller = TermuxNotificationController()
         if controller.available:
             self._android_notification = controller
 
+    def _start_linux_media_controls(self) -> None:
+        if (self.is_headless or sys.platform != "linux" or _is_termux_environment()
+                or not os.environ.get("DBUS_SESSION_BUS_ADDRESS")):
+            return
+        try:
+            from auen.linux_media import LinuxMediaControls
+        except ImportError:
+            self.notify(
+                "Install auen[linux] for desktop media controls. Playback still works.",
+                title="Optional Linux media controls", severity="warning",
+            )
+            return
+        self._linux_media = LinuxMediaControls(
+            self._handle_desktop_media_command, self._handle_desktop_media_seek,
+            self._handle_desktop_media_volume,
+        )
+        self._linux_media_task = asyncio.create_task(self._run_linux_media_controls())
+
+    async def _run_linux_media_controls(self) -> None:
+        bridge = self._linux_media
+        assert bridge is not None
+        try:
+            await bridge.start()
+            self._refresh_playback_status()
+            await bridge.wait_for_disconnect()
+            self.notify("Session bus disconnected; playback still works.",
+                        title="Linux media controls unavailable", severity="warning")
+        except Exception as exc:
+            self.notify(f"{exc}. Playback still works.",
+                        title="Linux media controls unavailable", severity="warning")
+        finally:
+            bridge.close()
+            if self._linux_media is bridge:
+                self._linux_media = None
+
+    def _start_windows_media_controls(self) -> None:
+        if self.is_headless or sys.platform != "win32":
+            return
+        from auen.windows_media import WindowsMediaControls
+
+        bridge = WindowsMediaControls(
+            self._handle_desktop_media_command, self._handle_desktop_media_seek,
+            self._windows_media_warning,
+        )
+        try:
+            bridge.start()
+        except ImportError:
+            self._windows_media_warning(
+                "Install auen[windows] for media keys/headphones. Playback still works."
+            )
+            return
+        except Exception as exc:
+            self._windows_media_warning(f"{exc}. Playback still works.")
+            return
+        self._windows_media = bridge
+        self.set_interval(0.05, self._pump_windows_media_controls)
+
+    def _pump_windows_media_controls(self) -> None:
+        if self._windows_media is not None:
+            self._windows_media.pump()
+
+    def _windows_media_warning(self, message: str) -> None:
+        self.notify(message, title="Optional Windows media controls", severity="warning")
+
+    def _handle_desktop_media_command(self, command: str) -> dict[str, Any]:
+        if command == "quit":
+            return self._handle_remote_command("stop")
+        if command == "stop":
+            if self.session.player is not None:
+                self.session.player.stop_playback()
+            if self._sleep_after_track:
+                self._sleep_after_track = False
+            self._refresh_playback_status()
+            return {"message": "Playback stopped; Queue retained"}
+        if command == "next" and self.session.player is not None:
+            player = self.session.player
+            paused = player.status.state is PlaybackState.PAUSED
+            result = self._handle_remote_command(command)
+            if paused:
+                player.pause()
+            return result
+        return self._handle_remote_command(command)
+
+    def _handle_desktop_media_seek(self, seconds: float, track_id: str) -> None:
+        track = self.session.current_track
+        if track is None or track_id != desktop_track_identity(track.track_id):
+            raise ValueError("track changed")
+        self._handle_media_seek(seconds, media_identity(track.uri))
+
+    def _handle_desktop_media_volume(self, volume: float) -> None:
+        if not math.isfinite(volume):
+            raise ValueError("invalid volume")
+        level = round(min(1.0, max(0.0, volume)) * 100)
+        if self.session.player is not None:
+            self.session.player.set_volume(level)
+        self.config.volume = level
+        self._refresh_playback_status()
+
+    def _update_desktop_media_snapshot(
+        self, track: Track | None, state: PlaybackState, *,
+        elapsed: float = 0.0, duration: float | None = None,
+    ) -> None:
+        if self._linux_media is None and self._windows_media is None:
+            return
+        from auen.android_media import youtube_thumbnail
+
+        player = self.session.player
+        active = track is not None and state in {PlaybackState.PLAYING, PlaybackState.PAUSED}
+        snapshot = MediaSnapshot(
+            state={PlaybackState.PLAYING: "Playing", PlaybackState.PAUSED: "Paused"}.get(
+                state, "Stopped"
+            ) if active else "Stopped",
+            track_id=desktop_track_identity(track.track_id) if active
+            and track is not None else NO_TRACK,
+            title=track.title if track is not None else "",
+            elapsed=elapsed, duration=duration,
+            art_url=youtube_thumbnail(track.uri) if track is not None else None,
+            volume=self.config.volume / 100,
+            can_next=bool(self.session.playlist.queue_list), can_previous=active,
+            can_play=player is not None and (active or bool(self.session.playlist.queue_list)),
+            can_pause=active,
+            can_seek=bool(active and player and player.backend.supports_seek
+                          and player.backend.capabilities.reports_position
+                          and duration is not None and math.isfinite(duration) and duration > 0),
+        )
+        if self._linux_media is not None:
+            self._linux_media.update(snapshot)
+        if self._windows_media is not None:
+            self._windows_media.update(snapshot)
+
+    def _configure_android_media_bridge(self) -> None:
+        if self._android_media_bridge is not None:
+            self._android_media_bridge.close()
+            self._android_media_bridge = None
+        self._media_companion_connected = False
+        if not self.config.android_media_controls:
+            return
+        if not _is_termux_environment():
+            self.notify(
+                "Android headphone controls require Termux. Ordinary playback still works.",
+                title="Optional headphone controls", severity="warning",
+            )
+            return
+        bridge = AndroidMediaBridge(
+            self.config.state_dir,
+            lambda command: self.call_from_thread(self._handle_remote_command, command),
+            seek_handler=lambda seconds, identity: self.call_from_thread(
+                self._handle_media_seek, seconds, identity
+            ),
+        )
+        try:
+            bridge.start()
+        except (OSError, RuntimeError) as exc:
+            self.notify(str(exc), title="Headphone controls unavailable", severity="warning")
+            return
+        self._android_media_bridge = bridge
+        bridge.start_autoconnect()
+        self.notify(
+            "Connecting the optional APK automatically. Until connected: headphone controls "
+            "unavailable; playback still works. Use 'auen media connect' if needed.",
+            title="Optional headphone controls", severity="warning",
+        )
+
+    def _update_android_media_snapshot(
+        self, track: Track | None, state: PlaybackState, *,
+        elapsed: float = 0.0, duration: float | None = None,
+    ) -> None:
+        bridge = self._android_media_bridge
+        if bridge is None:
+            return
+        connected = bridge.connected
+        if self._media_companion_connected and not connected:
+            self.notify(
+                "Companion disconnected: headphone controls unavailable. Playback still works.",
+                title="Headphone controls", severity="warning",
+            )
+        self._media_companion_connected = connected
+        held = self.session.player is not None and self.session.player.queue_held
+        title = track.title if track is not None else (
+            "Queue waiting" if held else "Nothing playing"
+        )
+        bridge.update(
+            state="paused" if track is None and held else state.name.lower(),
+            title=title,
+            elapsed=elapsed, duration=duration,
+            can_next=bool(self.session.playlist.queue_list), can_previous=track is not None,
+            source_uri=track.uri if track is not None else None,
+            can_seek=bool(self.session.player and self.session.player.backend.supports_seek),
+        )
+
+    def _handle_media_seek(self, seconds: float, identity: str) -> dict[str, Any]:
+        track, player = self.session.current_track, self.session.player
+        if track is None or player is None or media_identity(track.uri) != identity:
+            raise ValueError("seek unavailable or track changed")
+        status = player.status
+        duration = track.duration_seconds or status.duration_seconds
+        if (status.state not in {PlaybackState.PLAYING, PlaybackState.PAUSED}
+                or duration is None or not math.isfinite(duration) or duration <= 0
+                or not math.isfinite(seconds) or seconds < 0):
+            raise ValueError("seek unavailable")
+        player.seek_to(min(seconds, duration))
+        self._refresh_playback_status()
+        return {"message": "Playback position updated"}
+
     def _handle_remote_command(self, command: str) -> dict[str, Any]:
+        if command == "play":
+            self.action_play()
+            self._refresh_playback_status()
+            return {"message": "Playback resumed"}
+        if command == "pause":
+            self.action_pause()
+            self._refresh_playback_status()
+            return {"message": "Playback paused"}
         if command == "toggle":
             self.action_toggle_playback()
+            self._refresh_playback_status()
             return {"message": "Playback toggled"}
         if command == "next":
             self.action_next_track()
             return {"message": "Skipping to next track"}
+        if command == "previous":
+            result = self.action_previous_track()
+            return {"message": result or "Nothing is playing"}
         if command == "stop":
             self.call_after_refresh(self.exit)
             return {"message": "Stopping auen"}
@@ -2591,6 +2851,12 @@ class AuenApp(App[None]):
         controller = self._android_notification
         if controller is None:
             return
+        if self._android_media_bridge is not None and self._android_media_bridge.connected:
+            if not self._notification_suppressed_for_media:
+                controller.clear()
+                self._notification_suppressed_for_media = True
+            return
+        self._notification_suppressed_for_media = False
         player = self.session.player
         if track is None:
             if player is not None and player.queue_held and self.session.playlist.queue_list:
@@ -2632,6 +2898,8 @@ class AuenApp(App[None]):
         player = self.session.player
         track = self.session.current_track
         if player is None or track is None:
+            self._update_desktop_media_snapshot(track, PlaybackState.STOPPED)
+            self._update_android_media_snapshot(track, PlaybackState.STOPPED)
             self._refresh_android_notification(track, PlaybackState.STOPPED)
             self._reset_progress()
             return
@@ -2647,6 +2915,12 @@ class AuenApp(App[None]):
             self._now_playing_message(track, state_symbol)
         )
         duration = track.duration_seconds or status.duration_seconds
+        self._update_desktop_media_snapshot(
+            track, status.state, elapsed=elapsed, duration=duration
+        )
+        self._update_android_media_snapshot(
+            track, status.state, elapsed=elapsed, duration=duration
+        )
         if track.duration_seconds is None and duration is not None and duration > 0:
             track.duration_seconds = duration
             track.duration_display = _format_timestamp(duration)
@@ -3346,6 +3620,7 @@ class AuenApp(App[None]):
         self._settings_mode_before = self.config.session_mode
         self._settings_volume_before = self.config.volume
         self._settings_notification_before = self.config.android_notification
+        self._settings_media_controls_before = self.config.android_media_controls
         self.push_screen(SettingsScreen(self.config), self._settings_closed)
 
     def action_change_theme(self) -> None:
@@ -3382,10 +3657,20 @@ class AuenApp(App[None]):
             )
         if self.config.android_notification != self._settings_notification_before:
             self._configure_android_notification()
+        if self.config.android_media_controls != self._settings_media_controls_before:
+            self._configure_android_media_bridge()
 
     def action_toggle_playback(self) -> None:
         if self.session.player is not None:
             self.session.player.toggle_pause()
+
+    def action_play(self) -> None:
+        if self.session.player is not None:
+            self.session.player.play()
+
+    def action_pause(self) -> None:
+        if self.session.player is not None:
+            self.session.player.pause()
 
     @on(Button.Pressed, "#play-pause")
     def playback_button_pressed(self) -> None:
@@ -3402,6 +3687,27 @@ class AuenApp(App[None]):
     @on(Button.Pressed, "#next-track")
     def next_button_pressed(self) -> None:
         self.action_next_track()
+
+    def action_previous_track(self) -> str | None:
+        player = self.session.player
+        if player is None:
+            return None
+        try:
+            result = player.previous()
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.notify(str(exc), title="Previous unavailable", severity="warning")
+            return None
+        if result is None:
+            return None
+        if self._sleep_after_track:
+            self._sleep_after_track = False
+            player.cancel_hold_after_current()
+            self.notify("Cancelled because you used Previous", title="Sleep timer")
+        return "Restarting current track" if result == "restarted" else "Playing previous track"
+
+    @on(Button.Pressed, "#previous-track")
+    def previous_button_pressed(self) -> None:
+        self.action_previous_track()
 
     def action_seek_backward(self) -> None:
         self._seek(-10.0)
@@ -3597,6 +3903,12 @@ class AuenApp(App[None]):
 def run() -> None:
     """Launch the interactive application."""
     config = AuenConfig.load()
+    with InstanceLock(config.state_dir):
+        _run_instance(config)
+
+
+def _run_instance(config: AuenConfig) -> None:
+    """Only one instance may restore/write a given recovery state."""
     if config.backend == "termux" and _is_termux_environment() and shutil.which("mpv"):
         # v0.1.0 exposed the limited Termux:API backend directly. Prefer the
         # richer native mpv package once it becomes available.

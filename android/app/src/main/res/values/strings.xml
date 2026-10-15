@@ -1,0 +1,7 @@
+<resources>
+    <string name="diagnostics">Routing: %1$s\nLast input: %2$s\nLast reply: %3$s</string>
+    <string name="app_name">auen media controls</string>
+    <string name="route_keeper">Enable silent headphone-routing helper</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect companion (keep auen playing)</string>
+</resources>

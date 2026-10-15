@@ -2,15 +2,17 @@
 
 import asyncio
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from rich.cells import cell_len
 from textual.containers import Horizontal
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static, Switch
 
+from auen.android_media import media_identity
 from auen.app import (
     AuenApp,
     ClearHistoryScreen,
@@ -44,10 +46,19 @@ from auen.app import (
 )
 from auen.cache import CacheManager
 from auen.config import AuenConfig
+from auen.desktop_media import desktop_track_identity
 from auen.downloads import DownloadManager
-from auen.models import CollectionKind, MediaCollection, SessionMode, Track, TrackSource
+from auen.models import (
+    CollectionKind,
+    MediaCollection,
+    PlaybackState,
+    PlaybackStatus,
+    SessionMode,
+    Track,
+    TrackSource,
+)
 from auen.playlist_transfer import export_playlist, read_playlist, read_playlists
-from auen.remote import send_remote_command
+from auen.remote import InstanceLock, send_remote_command
 from auen.session import AuenSession
 from auen.state import StateStore
 
@@ -66,6 +77,147 @@ def make_app(tmp_path: Path, *, mode: SessionMode) -> AuenApp:
         config,
         session=AuenSession(config, state=state, cache=cache, downloads=downloads),
     )
+
+
+async def test_linux_media_snapshot_commands_seek_and_non_quitting_stop(tmp_path: Path) -> None:
+    pytest.importorskip("dbus_next")
+    from auen.linux_media import OBJECT_PATH
+
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(title="Local 🎵", source=TrackSource.LOCAL, uri="/private/song.opus",
+                  duration_seconds=100)
+    player = MagicMock()
+    player.status = PlaybackStatus(PlaybackState.PLAYING, elapsed_seconds=20, duration_seconds=100)
+    player.backend.supports_seek = True
+    player.backend.capabilities.reports_position = True
+    async with app.run_test():
+        bridge = MagicMock()
+        app._linux_media = bridge
+        app.session.current_track = track
+        app.session.player = player
+        app._refresh_playback_status()
+        snapshot = bridge.update.call_args.args[0]
+        assert snapshot.state == "Playing"
+        assert snapshot.title == "Local 🎵"
+        assert snapshot.can_seek
+        assert snapshot.art_url is None
+        assert "/private" not in snapshot.track_id
+        for command, method in [("play", "play"), ("pause", "pause"),
+                                ("next", "skip"), ("stop", "stop_playback")]:
+            app._handle_desktop_media_command(command)
+            getattr(player, method).assert_called_once()
+        assert app.is_running  # MPRIS Stop is not remote Stop/Quit.
+        identity = OBJECT_PATH + "/track/" + media_identity(track.track_id)
+        app._handle_desktop_media_seek(45, identity)
+        player.seek_to.assert_called_once_with(45)
+        with pytest.raises(ValueError, match="track changed"):
+            app._handle_desktop_media_seek(10, OBJECT_PATH + "/track/stale")
+        app._handle_desktop_media_volume(0.3)
+        player.set_volume.assert_called_once_with(30)
+        assert app.config.volume == 30
+    bridge.close.assert_called_once()
+
+
+async def test_linux_media_bus_failure_does_not_stop_playback(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    async with app.run_test():
+        bridge = MagicMock()
+        async def fail() -> None:
+            raise OSError("session bus unavailable")
+        bridge.start = fail
+        app._linux_media = bridge
+        await app._run_linux_media_controls()
+        bridge.close.assert_called_once()
+        assert app._linux_media is None
+        assert app.is_running
+
+
+async def test_linux_media_missing_dependency_is_optional(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    async with app.run_test():
+        with (
+            patch.object(AuenApp, "is_headless", new_callable=PropertyMock, return_value=False),
+            patch("auen.app.sys.platform", "linux"),
+            patch("auen.app._is_termux_environment", return_value=False),
+            patch.dict("os.environ", {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/fake"}),
+            patch.dict("sys.modules", {"auen.linux_media": None}),
+            patch.object(app, "notify") as notify,
+        ):
+            app._start_linux_media_controls()
+        assert "auen[linux]" in notify.call_args.args[0]
+        assert app._linux_media is None
+        assert app.is_running
+
+
+async def test_desktop_next_keeps_paused_state(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    player.status = PlaybackStatus(PlaybackState.PAUSED)
+    async with app.run_test():
+        app.session.player = player
+        app._handle_desktop_media_command("next")
+        player.skip.assert_called_once()
+        player.pause.assert_called_once()
+
+
+async def test_windows_snapshot_and_seek_do_not_import_linux_dependency(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(title="Windows local", source=TrackSource.LOCAL, uri="C:/Music/song.opus",
+                  duration_seconds=100)
+    player = MagicMock()
+    player.status = PlaybackStatus(PlaybackState.PAUSED, elapsed_seconds=20, duration_seconds=100)
+    player.backend.supports_seek = True
+    player.backend.capabilities.reports_position = True
+    bridge = MagicMock()
+    async with app.run_test():
+        app._windows_media = bridge
+        app.session.current_track = track
+        app.session.player = player
+        with patch.dict("sys.modules", {"auen.linux_media": None}):
+            app._refresh_playback_status()
+            snapshot = bridge.update.call_args.args[0]
+            assert snapshot.state == "Paused" and snapshot.can_seek
+            assert snapshot.track_id == desktop_track_identity(track.track_id)
+            assert "C:/Music" not in snapshot.track_id
+            app._handle_desktop_media_seek(45, snapshot.track_id)
+            player.seek_to.assert_called_once_with(45)
+    bridge.close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", [ImportError("missing WinRT"), OSError("unsupported OS")])
+async def test_windows_optional_start_failure_keeps_tui_running(
+    tmp_path: Path, failure: Exception,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    async with app.run_test():
+        with (
+            patch.object(AuenApp, "is_headless", new_callable=PropertyMock, return_value=False),
+            patch("auen.app.sys.platform", "win32"),
+            patch("auen.windows_media.WindowsMediaControls") as controls,
+            patch.object(app, "notify") as notify,
+        ):
+            controls.return_value.start.side_effect = failure
+            app._start_windows_media_controls()
+        assert app._windows_media is None
+        assert "Playback still works" in notify.call_args.args[0]
+        assert app.is_running
+
+
+async def test_windows_start_pump_and_close_are_wired_to_app_lifecycle(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    async with app.run_test():
+        with (
+            patch.object(AuenApp, "is_headless", new_callable=PropertyMock, return_value=False),
+            patch("auen.app.sys.platform", "win32"),
+            patch("auen.windows_media.WindowsMediaControls") as controls,
+        ):
+            app._start_windows_media_controls()
+        controls.return_value.start.assert_called_once()
+        app._pump_windows_media_controls()
+        assert controls.return_value.pump.called
+        app._refresh_playback_status()
+        assert controls.return_value.update.call_args.args[0].state == "Stopped"
+    controls.return_value.close.assert_called_once()
 
 
 async def test_playlist_transfer_dialogs_export_merge_cancel_and_keep_playback(
@@ -275,6 +427,176 @@ async def test_remote_playback_commands_use_app_actions(tmp_path: Path) -> None:
 
         player.toggle_pause.assert_called_once_with()
         player.skip.assert_called_once_with()
+
+
+async def test_explicit_remote_controls_and_previous_use_shared_actions(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    player.previous.return_value = "previous"
+
+    async with app.run_test():
+        app.session.player = player
+        app._handle_remote_command("play")
+        app._handle_remote_command("play")
+        app._handle_remote_command("pause")
+        app._handle_remote_command("pause")
+        assert app._handle_remote_command("previous")["message"] == "Playing previous track"
+        assert player.play.call_count == 2
+        assert player.pause.call_count == 2
+        player.previous.assert_called_once_with()
+        player.toggle_pause.assert_not_called()
+
+
+async def test_remote_pause_publishes_state_before_acknowledgement(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    player.queue_held = False
+    player.status = PlaybackStatus(PlaybackState.PLAYING, elapsed_seconds=12, duration_seconds=180)
+    player.pause.side_effect = lambda: setattr(
+        player, "status", PlaybackStatus(
+            PlaybackState.PAUSED, elapsed_seconds=12, duration_seconds=180
+        )
+    )
+    bridge = MagicMock()
+    bridge.connected = False
+    track = Track(
+        title="Cached", source=TrackSource.LOCAL, uri="/cached.opus", duration_seconds=180
+    )
+    async with app.run_test():
+        app.session.player = player
+        app.session.current_track = track
+        app._android_media_bridge = bridge
+        response = app._handle_remote_command("pause")
+        assert response["message"] == "Playback paused"
+        assert bridge.update.call_args.kwargs["state"] == "paused"
+        assert bridge.update.call_args.kwargs["elapsed"] == 12
+
+
+async def test_previous_key_button_and_search_text(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    player.previous.return_value = "restarted"
+
+    async with app.run_test(size=(60, 30)) as pilot:
+        app.session.player = player
+        app.query_one("#queue", DataTable).focus()
+        await pilot.press("b")
+        player.previous.assert_called_once_with()
+        await pilot.click("#previous-track")
+        assert player.previous.call_count == 2
+        await pilot.press("/")
+        await pilot.press("b")
+        assert app.query_one("#search-bar", Input).value == "b"
+        assert player.previous.call_count == 2
+
+
+async def test_previous_cancels_after_track_sleep_but_not_timed_sleep(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    player.previous.return_value = "restarted"
+
+    async with app.run_test():
+        app.session.player = player
+        app._sleep_after_track = True
+        app._sleep_deadline = time.monotonic() + 60
+        assert app.action_previous_track() == "Restarting current track"
+        assert not app._sleep_after_track
+        assert app._sleep_deadline is not None
+        player.cancel_hold_after_current.assert_called_once_with()
+
+
+async def test_previous_unavailable_does_not_cancel_sleep(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    player.previous.side_effect = RuntimeError("cannot seek")
+
+    async with app.run_test():
+        app.session.player = player
+        app._sleep_after_track = True
+        assert app.action_previous_track() is None
+        assert app._sleep_after_track
+        player.cancel_hold_after_current.assert_not_called()
+
+
+async def test_absent_media_companion_warns_but_playback_and_notifications_work(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(title="Local", source=TrackSource.LOCAL, uri="/local.opus")
+    player = MagicMock()
+    player.queue_held = False
+    player.status = PlaybackStatus(PlaybackState.PLAYING, elapsed_seconds=15, duration_seconds=60)
+    notifications = MagicMock()
+    async with app.run_test():
+        app.session.player = player
+        app.session.current_track = track
+        app._android_notification = notifications
+        app.config.android_media_controls = True
+        with (
+            patch("auen.app._is_termux_environment", return_value=True),
+            patch.object(app, "notify") as notify,
+        ):
+            app._configure_android_media_bridge()
+            assert app._android_media_bridge is not None
+            assert not app._android_media_bridge.connected
+            assert "headphone controls unavailable" in notify.call_args.args[0]
+            app._refresh_playback_status()
+        notifications.update.assert_called_with("Local", playing=True)
+        app.action_toggle_playback()
+        player.toggle_pause.assert_called_once_with()
+        assert app.session.current_track is track
+
+
+async def test_companion_disconnect_restores_notification_without_stopping_audio(
+    tmp_path: Path,
+) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(title="Playing", source=TrackSource.LOCAL, uri="/playing.opus")
+    player = MagicMock()
+    player.queue_held = False
+    player.status = PlaybackStatus(PlaybackState.PLAYING)
+    notifications = MagicMock()
+    bridge = MagicMock()
+    bridge.connected = True
+    async with app.run_test():
+        app.session.player = player
+        app.session.current_track = track
+        app._android_notification = notifications
+        app._android_media_bridge = bridge
+        app._refresh_playback_status()
+        notifications.clear.assert_called_once_with()
+        notifications.update.assert_not_called()
+        app._refresh_playback_status()
+        notifications.clear.assert_called_once_with()
+        bridge.connected = False
+        with patch.object(app, "notify") as notify:
+            app._refresh_playback_status()
+            assert "Companion disconnected" in notify.call_args.args[0]
+            app._refresh_playback_status()
+            notify.assert_called_once()
+        notifications.update.assert_called_with("Playing", playing=True)
+        player.close.assert_not_called()
+        player.pause.assert_not_called()
+        player.skip.assert_not_called()
+
+
+async def test_media_bridge_failure_is_nonfatal_and_toggle_is_saved(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    player = MagicMock()
+    async with app.run_test() as pilot:
+        app.session.player = player
+        await pilot.press("f2")
+        app.screen.query_one("#android-media-controls", Switch).value = True
+        with (
+            patch("auen.app._is_termux_environment", return_value=True),
+            patch("auen.app.AndroidMediaBridge") as bridge,
+        ):
+            bridge.return_value.start.side_effect = OSError("optional service unavailable")
+            await pilot.click("#save")
+        assert app.config.android_media_controls is True
+        assert app._android_media_bridge is None
+        player.close.assert_not_called()
+        player.skip.assert_not_called()
 
 
 async def test_search_result_can_be_selected_into_durable_queue(tmp_path: Path) -> None:
@@ -626,7 +948,9 @@ def test_run_closes_session_after_unhandled_ui_error(tmp_path: Path) -> None:
     app.run.side_effect = RuntimeError("UI crash")
 
     with (
-        patch("auen.app.AuenConfig.load", return_value=AuenConfig(config_dir=tmp_path)),
+        patch("auen.app.AuenConfig.load", return_value=AuenConfig(
+            config_dir=tmp_path, state_dir=tmp_path / "state"
+        )),
         patch("auen.app.detect_backend", return_value=MagicMock()),
         patch("auen.app.AuenApp", return_value=app),
         pytest.raises(RuntimeError, match="UI crash"),
@@ -642,7 +966,9 @@ def test_run_preserves_ui_error_when_backend_cleanup_also_fails(tmp_path: Path) 
     app.session.close.side_effect = RuntimeError("backend stop timed out")
 
     with (
-        patch("auen.app.AuenConfig.load", return_value=AuenConfig(config_dir=tmp_path)),
+        patch("auen.app.AuenConfig.load", return_value=AuenConfig(
+            config_dir=tmp_path, state_dir=tmp_path / "state"
+        )),
         patch("auen.app.detect_backend", return_value=MagicMock()),
         patch("auen.app.AuenApp", return_value=app),
         pytest.raises(RuntimeError, match="UI crash"),
@@ -653,7 +979,7 @@ def test_run_preserves_ui_error_when_backend_cleanup_also_fails(tmp_path: Path) 
 
 
 def test_run_migrates_termux_preference_when_mpv_is_available(tmp_path: Path) -> None:
-    config = AuenConfig(config_dir=tmp_path, backend="termux")
+    config = AuenConfig(config_dir=tmp_path, state_dir=tmp_path / "state", backend="termux")
     app = MagicMock()
 
     with (
@@ -668,6 +994,49 @@ def test_run_migrates_termux_preference_when_mpv_is_available(tmp_path: Path) ->
     assert config.backend == "auto"
     detect.assert_called_once_with("auto")
     app.run.assert_called_once_with()
+
+
+def test_second_instance_is_rejected_before_session_restore_or_backend_start(
+    tmp_path: Path,
+) -> None:
+    config = AuenConfig(config_dir=tmp_path, state_dir=tmp_path / "state")
+    with (
+        InstanceLock(config.state_dir),
+        patch("auen.app.AuenConfig.load", return_value=config),
+        patch("auen.app.detect_backend") as backend,
+        patch("auen.app.AuenApp") as app,
+        pytest.raises(RuntimeError, match="another auen instance"),
+    ):
+        run()
+    backend.assert_not_called()
+    app.assert_not_called()
+
+
+def test_media_slider_seek_preserves_pause_clamps_and_rejects_old_track(tmp_path: Path) -> None:
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    track = Track(
+        title="Paused", source=TrackSource.LOCAL, uri="/paused.opus", duration_seconds=180
+    )
+    player = MagicMock()
+    player.status = PlaybackStatus(PlaybackState.PAUSED, elapsed_seconds=20, duration_seconds=180)
+    app.session.current_track = track
+    app.session.player = player
+    try:
+        with patch.object(app, "_refresh_playback_status") as refresh:
+            app._handle_media_seek(42, media_identity(track.uri))
+            player.seek_to.assert_called_once_with(42)
+            refresh.assert_called_once_with()
+            player.seek_to.reset_mock()
+            app._handle_media_seek(1000, media_identity(track.uri))
+            player.seek_to.assert_called_once_with(180)
+            player.seek_to.reset_mock()
+            with pytest.raises(ValueError, match="track changed"):
+                app._handle_media_seek(10, media_identity("/old.opus"))
+            player.seek_to.assert_not_called()
+            player.play.assert_not_called()
+            player.toggle_pause.assert_not_called()
+    finally:
+        app.session.close()
 
 
 async def test_unmount_suppresses_backend_cleanup_error(tmp_path: Path) -> None:
@@ -785,12 +1154,19 @@ async def test_narrow_layout_uses_compact_playback_labels(tmp_path: Path) -> Non
         assert str(app.query_one("#seek-forward", Button).label) == "+10s ]"
         assert str(app.query_one("#jump-time", Button).label) == "Jump g"
         assert str(app.query_one("#next-track", Button).label) == "Next n"
+        assert str(app.query_one("#previous-track", Button).label) == "Prev b"
+        controls = app.query_one("#playback-controls")
+        play_pause = app.query_one("#play-pause", Button)
+        assert "Play/Pause" in play_pause.render_line(0).text
+        for button in controls.query(Button):
+            assert button.region.right <= controls.region.right
+            assert button.region.x >= controls.region.x
 
 
 def test_footer_hides_actions_already_shown_as_playback_buttons() -> None:
     bindings = {binding.key: binding for binding in AuenApp.BINDINGS}
 
-    for key in ("space", "n", "[", "]", "g"):
+    for key in ("space", "n", "b", "[", "]", "g"):
         assert not bindings[key].show
     for key in ("/", "d", "f2", "f3", "q"):
         assert bindings[key].show

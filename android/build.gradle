@@ -1,0 +1,8 @@
+plugins { id 'com.android.application' version '8.7.3' apply false }
+
+// Redirect generated artifacts with -PauenBuildRoot=PATH when building outside the checkout.
+allprojects {
+    if (providers.gradleProperty('auenBuildRoot').isPresent()) {
+        layout.buildDirectory.set(file("${providers.gradleProperty('auenBuildRoot').get()}/${project.name}"))
+    }
+}

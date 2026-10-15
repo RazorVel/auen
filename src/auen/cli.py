@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from auen import __version__
+from auen.android_media import media_pairing_code, open_media_companion
 from auen.config import AuenConfig
 from auen.playlist_transfer import (
     PlaylistDocument,
@@ -19,7 +21,7 @@ from auen.playlist_transfer import (
     export_playlists,
     read_playlists,
 )
-from auen.remote import send_remote_command
+from auen.remote import REMOTE_COMMANDS, send_remote_command
 from auen.state import StateStore
 
 if TYPE_CHECKING:
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
 SETTING_ALIASES = {
     "android.notification": "android_notification",
     "android.notification_controls": "android_notification",
+    "android.headphone_controls": "android_media_controls",
     "cache.max_size": "cache_max_bytes",
     "cache.max_bytes": "cache_max_bytes",
     "cache.directory": "cache_dir",
@@ -72,8 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
     remote_parser = subparsers.add_parser("remote", help="Control a running auen instance")
     remote_parser.add_argument(
         "remote_command",
-        choices=("toggle", "next", "stop", "status"),
+        choices=sorted(REMOTE_COMMANDS),
     )
+    media_parser = subparsers.add_parser("media", help="Pair the Android media-control companion")
+    media_parser.add_argument("media_command", choices=("pair", "connect"))
     playlist_parser = subparsers.add_parser(
         "playlist", help="Import or export offline track lists"
     )
@@ -102,6 +107,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _doctor()
         if args.command == "remote":
             return _handle_remote(args.remote_command)
+        if args.command == "media":
+            config = AuenConfig.load()
+            if args.media_command == "pair":
+                print(media_pairing_code(config.state_dir))
+            else:
+                open_media_companion(config.state_dir)
+                print("Opened auen media companion; connecting automatically")
+            return 0
         if args.command == "playlist":
             return _handle_playlist(args)
         if args.command is None:
@@ -259,6 +272,21 @@ def _format_value(value: Any) -> str:
 def _doctor() -> int:
     problems = 0
     print(f"[ok] Python {sys.version_info.major}.{sys.version_info.minor}")
+    if sys.platform == "win32":
+        from auen.windows_media import missing_windows_media_packages
+
+        if missing_windows_media_packages():
+            print("[info] Windows media controls are optional: install auen[windows]")
+        else:
+            print("[ok] Windows media-control dependencies available (routing needs a live test)")
+    if (sys.platform == "linux" and "TERMUX_VERSION" not in os.environ
+            and not os.environ.get("PREFIX", "").startswith("/data/data/com.termux/")):
+        if importlib.util.find_spec("dbus_next") is None:
+            print("[info] Linux media controls are optional: install auen[linux]")
+        elif not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            print("[info] Linux media controls: no desktop session bus in this terminal")
+        else:
+            print("[ok] Linux media-control dependency and session-bus address available")
 
     try:
         config = AuenConfig.load()

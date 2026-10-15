@@ -98,6 +98,7 @@ def build_app(root: Path) -> tuple[AuenApp, AuenSession]:
 def show_playback(app: AuenApp) -> None:
     current = TRACKS[0]
     app.session.current_track = current
+    app._sleep_after_track = True
     app._show_now_playing(current)
     app.query_one("#playback-progress", ProgressBar).update(total=284, progress=97)
     app.query_one("#playback-time", Static).update("1:37 / 4:44")
@@ -114,6 +115,7 @@ async def capture(
 ) -> None:
     with TemporaryDirectory(prefix="auen-preview-") as temporary:
         old_termux = os.environ.get("TERMUX_VERSION")
+        old_no_color = os.environ.pop("NO_COLOR", None)
         if termux:
             os.environ["TERMUX_VERSION"] = "preview"
         else:
@@ -150,6 +152,7 @@ async def capture(
                 app.query_one("#results", DataTable).focus()
                 app._update_context_guides()
                 await pilot.pause()
+                show_playback(app)
                 svg = app.export_screenshot(title="auen")
                 svg = re.sub(r"terminal-\d+", "terminal-auen", svg)
                 svg = re.sub(r">\d{2}:\d{2}:\d{2}<", ">12:34:56<", svg, count=1)
@@ -192,6 +195,8 @@ async def capture(
                 os.environ.pop("TERMUX_VERSION", None)
             else:
                 os.environ["TERMUX_VERSION"] = old_termux
+            if old_no_color is not None:
+                os.environ["NO_COLOR"] = old_no_color
 
 
 async def main() -> None:
@@ -207,7 +212,7 @@ async def main() -> None:
     await capture(
         "auen-library.svg", size=(78, 28), view="library", crop=pane_crop
     )
-    await capture("auen-termux.svg", size=(60, 32), view="overview", termux=True)
+    await capture("auen-termux.svg", size=(72, 34), view="overview", termux=True)
 
 
 if __name__ == "__main__":

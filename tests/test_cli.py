@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from auen.cli import main
 
 
@@ -17,6 +19,45 @@ def test_config_set_get_and_reset(tmp_path: Path, capsys: object) -> None:
     assert "volume=65" in output
     assert "65" in output
     assert "volume=80" in output
+
+
+@pytest.mark.parametrize("dependency,bus,label", [
+    (False, True, "install auen[linux]"),
+    (True, False, "no desktop session bus"),
+    (True, True, "dependency and session-bus address available"),
+])
+def test_doctor_linux_media_controls_are_optional(
+    tmp_path: Path, capsys: object, dependency: bool, bus: bool, label: str,
+) -> None:
+    with (
+        patch("auen.config.user_config_dir", return_value=str(tmp_path)),
+        patch("auen.cli.sys.platform", "linux"),
+        patch.dict("os.environ", {"DBUS_SESSION_BUS_ADDRESS": "test" if bus else ""}, clear=True),
+        patch("auen.cli.shutil.which", side_effect=lambda name:
+              "/usr/bin/mpv" if name == "mpv" else None),
+        patch("auen.cli.importlib.util.find_spec", side_effect=lambda name:
+              object() if name != "dbus_next" or dependency else None),
+    ):
+        assert main(["doctor"]) == 0
+    assert label in capsys.readouterr().out  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_doctor_windows_media_controls_are_optional(
+    tmp_path: Path, capsys: object, missing: bool,
+) -> None:
+    with (
+        patch("auen.config.user_config_dir", return_value=str(tmp_path)),
+        patch("auen.cli.sys.platform", "win32"),
+        patch("auen.cli.shutil.which", side_effect=lambda name:
+              "/usr/bin/mpv" if name == "mpv" else None),
+        patch("auen.cli.importlib.util.find_spec", return_value=object()),
+        patch("auen.windows_media.missing_windows_media_packages",
+              return_value=["winrt-Windows.Media"] if missing else []),
+    ):
+        assert main(["doctor"]) == 0
+    output = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert ("install auen[windows]" if missing else "routing needs a live test") in output
 
 
 def test_config_accepts_human_readable_cache_size(tmp_path: Path, capsys: object) -> None:
@@ -146,6 +187,17 @@ def test_remote_command_contacts_running_instance(tmp_path: Path, capsys: object
     assert "Playback toggled" in capsys.readouterr().out  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("command", ["play", "pause", "previous"])
+def test_remote_cli_accepts_explicit_media_commands(tmp_path: Path, command: str) -> None:
+    config = MagicMock(state_dir=tmp_path)
+    with (
+        patch("auen.cli.AuenConfig.load", return_value=config),
+        patch("auen.cli.send_remote_command", return_value={"ok": True}) as send,
+    ):
+        assert main(["remote", command]) == 0
+    send.assert_called_once_with(tmp_path, command)
+
+
 def test_remote_command_reports_missing_instance(tmp_path: Path, capsys: object) -> None:
     config = MagicMock(state_dir=tmp_path)
     with (
@@ -158,3 +210,19 @@ def test_remote_command_reports_missing_instance(tmp_path: Path, capsys: object)
         assert main(["remote", "status"]) == 2
 
     assert "no running auen instance" in capsys.readouterr().err  # type: ignore[attr-defined]
+
+
+def test_media_pairing_requires_opt_in_bridge(tmp_path: Path, capsys: object) -> None:
+    with patch("auen.cli.AuenConfig.load", return_value=MagicMock(state_dir=tmp_path)):
+        assert main(["media", "pair"]) == 2
+    assert "enable Android headphone controls" in capsys.readouterr().err  # type: ignore[attr-defined]
+
+
+def test_media_connect_does_not_print_pairing_credentials(tmp_path: Path, capsys: object) -> None:
+    with (
+        patch("auen.cli.AuenConfig.load", return_value=MagicMock(state_dir=tmp_path)),
+        patch("auen.cli.open_media_companion") as open_companion,
+    ):
+        assert main(["media", "connect"]) == 0
+    open_companion.assert_called_once_with(tmp_path)
+    assert "Opened auen media companion" in capsys.readouterr().out  # type: ignore[attr-defined]

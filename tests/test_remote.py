@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from auen.remote import RemoteControlServer, control_socket_path, send_remote_command
+from auen.remote import InstanceLock, RemoteControlServer, control_socket_path, send_remote_command
 
 
 def test_remote_server_round_trip_and_private_permissions(tmp_path: Path) -> None:
@@ -65,6 +65,21 @@ def test_remote_client_rejects_unknown_command(tmp_path: Path) -> None:
         send_remote_command(tmp_path, "volume-up")
 
 
+@pytest.mark.parametrize("command", ["play", "pause", "previous"])
+@pytest.mark.parametrize("tcp", [False, True])
+def test_explicit_media_commands_round_trip(tmp_path: Path, command: str, tcp: bool) -> None:
+    if not tcp and os.name == "nt":
+        pytest.skip("Unix socket transport")
+    server = RemoteControlServer(
+        tmp_path, lambda received: {"message": received}, tcp=tcp
+    )
+    server.start()
+    try:
+        assert send_remote_command(tmp_path, command, tcp=tcp)["message"] == command
+    finally:
+        server.close()
+
+
 def test_windows_transport_round_trip_and_authentication(tmp_path: Path) -> None:
     received: list[str] = []
     server = RemoteControlServer(
@@ -111,3 +126,33 @@ def test_windows_transport_replaces_stale_endpoint_and_restarts(tmp_path: Path) 
         assert send_remote_command(tmp_path, "status", tcp=True)["ok"] is True
     finally:
         server.close()
+
+
+def test_instance_lock_rejects_second_player_and_releases_after_exit(tmp_path: Path) -> None:
+    with InstanceLock(tmp_path):
+        with (
+            pytest.raises(RuntimeError, match="another auen instance"), InstanceLock(tmp_path),
+        ):
+            pytest.fail("Second instance entered")
+        assert not (tmp_path / "instance.json").exists()
+    with InstanceLock(tmp_path):
+        pass
+
+
+def test_instance_lock_is_scoped_to_state_directory(tmp_path: Path) -> None:
+    with InstanceLock(tmp_path / "first"), InstanceLock(tmp_path / "second"):
+        pass
+
+
+def test_instance_lock_also_detects_older_running_builds(tmp_path: Path) -> None:
+    server = RemoteControlServer(tmp_path, lambda _command: {})
+    server.start()
+    try:
+        with (
+            pytest.raises(RuntimeError, match="another auen instance"), InstanceLock(tmp_path),
+        ):
+            pytest.fail("Existing player was ignored")
+    finally:
+        server.close()
+    with InstanceLock(tmp_path):
+        pass

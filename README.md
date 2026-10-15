@@ -8,11 +8,14 @@
 full-screen Textual interface for YouTube search, queue management, streaming, and a
 size-limited persistent playback cache.
 
-> **Release — v1.1.0:** Windows playback and remote control, plus offline playlist track-list
-> import/export for one or all named playlists. Automated checks pass on Linux; manual
-> functionality checks pass on Linux, a physical Termux device, and Windows Terminal with mpv.
+> **Release — v1.2.0:** Previous-track navigation and optional keyboard/headset media controls
+> on Linux, Windows, and Android/Termux. Core controls were tested by the user on Linux,
+> Windows 11, and Android 13. Platform setup and remaining limitations are documented below.
 
 ![auen in a wide terminal](docs/assets/auen-wide.svg)
+
+Terminal previews are reproducible renders of the real TUI using sample data. The Android
+media cards below are cropped screenshots from a physical device.
 
 ### Recently played
 
@@ -42,12 +45,32 @@ borders while keeping playback, seeking, command mode, and the offline status st
 
 ![auen in Termux phone-width layout](docs/assets/auen-termux.svg)
 
-## What works in v1.1.0
+### Background media controls
+
+The optional Android companion provides lock-screen media controls, artwork, and a progress
+slider without opening Termux. Headset buttons use the same playback actions.
+
+<img src="docs/assets/auen-android-media-card.png" alt="Android companion lock-screen media card with artwork, progress slider, Previous, Pause, and Next" width="560">
+
+Without the companion, optional Termux:API notifications provide Pause/Resume, Next, and
+Stop. This fallback does not provide headset routing or a seek slider.
+
+<img src="docs/assets/auen-termux-notification.png" alt="Termux:API fallback notification showing the current track and Pause, Next, and Stop actions" width="560">
+
+These screenshots are from Android 13; appearance and available controls vary by device.
+See [Android setup](#install-on-android--termux) and the
+[desktop media-control guide](docs/media-controls.md) for Linux and Windows integration.
+
+## What works in v1.2.0
 
 - Search YouTube and select tracks, albums, or playlists.
 - Load more results explicitly without fetching merely by moving the cursor.
 - Stream immediately or stream while retaining a managed offline copy.
 - Play, pause, jump to a timestamp, seek by 10 seconds, and skip tracks with `mpv`.
+- Press `b` to restart after three seconds, or return to the prior played track near the start.
+  Previous follows actual playback order, including Shuffle, and preserves paused playback.
+- Use optional Linux MPRIS or Windows media controls while the terminal is minimized.
+  An optional Android companion adds headset controls, artwork, and media-session seeking.
 - Add duplicate tracks with confirmation; play any queued row now or move its priority.
 - Persist the queue, recently played tracks, cached media, settings, and playback position
   across restarts and crashes.
@@ -82,12 +105,15 @@ or account challenge.
 
 ## Requirements
 
-- Python 3.10 or newer
+- Python 3.10 or newer; **Python 3.14 recommended on Windows** for the optional media-control
+  packages (the pinned PyWinRT release has no Python 3.15 wheels)
 - Linux or Windows with `mpv`, or Android with Termux and its `mpv` package
 - Network access for YouTube search and streaming
 
-`pipx` is recommended on Linux because it keeps auen and its Python dependencies in an
-isolated environment.
+`pipx` is recommended on Linux and Windows because it isolates Python dependencies and
+provides the normal `auen` command. mpv is installed separately; the wheel does not bundle it.
+The `[linux]` and `[windows]` extras enable optional desktop integration, not audio playback.
+Download packages from the [v1.2.0 release](https://github.com/razorvel/auen/releases/tag/v1.2.0).
 
 ## Install on Linux
 
@@ -98,63 +124,113 @@ sudo apt install mpv pipx
 pipx ensurepath
 ```
 
-Install the tagged release directly from GitHub:
+Download `auen-1.2.0-py3-none-any.whl`, open a terminal in that folder, then install with
+optional desktop media controls:
 
 ```console
-pipx install 'git+https://github.com/razorvel/auen.git@v1.1.0'
+pipx install './auen-1.2.0-py3-none-any.whl[linux]'
+auen --version
 auen doctor
 auen
 ```
 
-For a checked-out source tree, use `pipx install .`. A regular virtual environment also
-works:
+Open a new terminal if `auen` is not found after `pipx ensurepath`. Omit `[linux]` for just
+the player. Desktop environments may route media keys automatically; i3 needs explicit
+[universal playerctl bindings](docs/media-controls.md#linux-desktop-media-controls).
+Installing the extra alone does not configure hardware routing.
+
+Alternatively, install tagged GitHub source (requires Git):
+
+```console
+pipx install 'auen[linux] @ git+https://github.com/razorvel/auen.git@v1.2.0'
+```
+
+For a checked-out source tree, use `pipx install '.[linux]'`. A regular virtual environment
+also works:
 
 ```console
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install .
+python -m pip install '.[linux]'
 auen doctor
 auen
 ```
 
 ## Install on Windows
 
-Use Python 3.10 or newer and a Windows terminal such as Windows Terminal. Install a Windows
-mpv build listed on the [mpv installation page](https://mpv.io/installation/), and make sure
-`mpv.exe` is on `PATH`. In PowerShell, install auen into a virtual environment:
+Use Windows Terminal and **CPython 3.14** for the tested media-control setup. Install a Windows
+mpv build listed on the [mpv installation page](https://mpv.io/installation/); `mpv --version`
+must work in the same terminal. Both `mpv.exe` and `mpv.com` are recognized.
+
+Download `auen-1.2.0-py3-none-any.whl` and open PowerShell in its folder. If needed, install
+Python 3.14 using the [Python Install Manager](https://www.python.org/downloads/windows/)
+(`py install 3.14`), or install CPython 3.14 separately. Confirm `py -3.14 --version`, then:
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install "https://github.com/razorvel/auen/archive/refs/tags/v1.1.0.zip"
-.\.venv\Scripts\auen.exe --version
+py -3.14 -m pip install --user --upgrade pipx
+py -3.14 -m pipx install --force --python 3.14 ".\auen-1.2.0-py3-none-any.whl[windows]"
+py -3.14 -m pipx ensurepath --prepend --force
+```
+
+Fully close Windows Terminal and reopen it so its PATH refreshes. Then use plain `auen`:
+
+```powershell
+where.exe auen
+auen --version
+auen doctor
+auen
+```
+
+Expect `auen 1.2.0`, Python 3.14, mpv available, and Windows media-control dependencies `[ok]`.
+If another Python's `auen` takes precedence, inspect `where.exe auen` first. An old pipx
+environment may need `py -3.14 -m pipx reinstall auen --python 3.14`. Do not uninstall unrelated
+Python apps. The pinned PyWinRT packages support CPython through 3.14, not 3.15;
+[available wheels](https://pypi.org/project/winrt-Windows.Media.Interop/#files).
+
+Without pipx, create a virtual environment and run its launcher directly:
+
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install ".\auen-1.2.0-py3-none-any.whl[windows]"
 .\.venv\Scripts\auen.exe doctor
 .\.venv\Scripts\auen.exe
 ```
 
-Playback control uses mpv's Windows named pipe. `auen remote status`, `toggle`, `next`, and
-`stop` work from another terminal using an authenticated connection bound only to loopback.
-Linux and Termux continue to use their private Unix socket. Android notification controls
-remain specific to Termux. Paths for settings, saved state, and cached media follow the
-operating system's user directories.
+With `[windows]`, auen registers a native media card; look above Quick Settings (**Win+A**
+on Windows 11) while a track plays. Media keys/headset gestures are routed by Windows.
+Omit the extra to keep ordinary terminal playback without native media controls.
+No Android APK, SDK, or administrator rights are required for this integration.
+
+Playback uses mpv's Windows named pipe. Remote commands use an authenticated loopback-only
+connection on Windows and private Unix sockets on Linux/Termux. Settings, state, and caches
+use the operating system's user directories.
 
 The [Windows validation checklist](docs/windows-testing.md) covers installation, playback,
 remote control, persistence, rendering, and playlist transfer. The automated test workflow
 includes Windows and Linux, plus a native mpv IPC check that does not require a sound device.
 
-## Prepare Termux for testing
+## Install on Android / Termux
 
 Install [Termux](https://github.com/termux/termux-app#installation), then run:
 
 ```console
 pkg update
+pkg upgrade
 pkg install python git mpv ffmpeg
-python -m pip install 'git+https://github.com/razorvel/auen.git@v1.1.0'
+python -m pip install 'git+https://github.com/razorvel/auen.git@v1.2.0'
+auen --version
 auen doctor
 auen
 ```
 
 mpv is selected automatically and provides seeking, direct streaming, volume control, and
 precise position reporting. Termux:API is not required when mpv is installed.
+Upgrade all Termux packages together: partial upgrades can cause ffmpeg/mpv library-linking
+errors. Do not upgrade Termux's pip using pip itself.
+
+Alternatively, install the downloaded wheel with
+`python -m pip install ~/downloads/auen-1.2.0-py3-none-any.whl` (adjust its location).
+Use normal dependency resolution, not `--no-deps`, for a fresh installation.
 
 Optional Android notification controls require the
 [Termux:API companion app](https://github.com/termux/termux-api#installation) from the same
@@ -164,16 +240,29 @@ source as Termux, then install its command package:
 pkg install termux-api
 ```
 
-Termux and its companion apps must come from the same source because their signatures must
+Termux and Termux:API must come from the same source because their signatures must
 match. auen continues to use mpv for audio; Termux:API is used only to display an ongoing
 notification with Pause/Resume, Next, and Stop actions. Disable it through **Android playback
 notification** in Settings or `auen config set android.notification false`.
+
+For **TWS/headset buttons and Android's media progress slider**, install the separate optional
+`auen-media-controls-0.6.0-prototype.apk`, then enable **Android headphone controls (APK)**
+in F2. It connects automatically, shows artwork, and stays ready while idle. See the
+[companion setup and build instructions](android/README.md), including manual connection,
+permissions, signing, and troubleshooting. This release reuses that tested APK unchanged;
+its version is independent of Python auen 1.2.0. It remains a test-signed prototype.
+The auen companion is a separate app and does not need to share Termux's signing certificate.
+
+The APK is not required for auen playback. If absent or disconnected, audio continues;
+Termux:API notification controls return when enabled. Android controls which media layouts
+expose seeking and may restrict background startup or lock-screen actions.
 
 The same private local control channel is available from another Termux session:
 
 ```console
 auen remote status
 auen remote toggle
+auen remote previous
 auen remote next
 auen remote stop
 ```
@@ -184,6 +273,24 @@ Termux/Linux user.
 
 The real-device test sequence and expected limitations are recorded in
 [`docs/termux-testing.md`](docs/termux-testing.md).
+
+## Updating and media-control limits
+
+For pipx, install a newer downloaded wheel with `pipx install --force '<wheel-path>[linux]'`
+or the Windows Python-3.14-pinned command above with `[windows]`. `pipx install --upgrade`
+is not valid; replacing a local wheel uses `--force`. On Termux, use
+`python -m pip install --upgrade <wheel-path>`. Existing settings, playlists, History, and
+managed offline media remain in their user-data directories; do not delete them to update.
+
+Linux and Windows hardware **Stop** stops playback but keeps auen open; Play restarts the
+retained track. **`auen remote stop` and Android notification Stop quit auen**.
+Only one auen instance may use a given state directory at a time.
+
+Core media controls passed user tests on Linux, Windows 11/CPython 3.14, and Itel RS4/Android 13.
+Windows seeking and hardware Stop remain physically unverified: the tested card exposed no
+seek slider. Other Android devices, calls/audio-focus interactions, and manufacturer battery
+limits need further testing. Missing optional integration must not prevent ordinary playback.
+See [platform media controls](docs/media-controls.md) for routing and diagnostic details.
 
 ## Essential controls
 
@@ -197,6 +304,7 @@ The real-device test sequence and expected limitations are recorded in
 | `[` / `]` | Seek backward or forward 10 seconds |
 | `g` | Jump to a timestamp |
 | `n` | Play next track |
+| `b` | Restart after 3 seconds; near the start, return to the previous played track |
 | `h` | Open or leave Recently Played |
 | `p` | Open or leave named Playlists |
 | `l` | Open or leave Offline media |
@@ -324,6 +432,8 @@ make build
 `make check` runs the test suite with a safety timeout, linting, and strict type checking.
 `make build` creates a wheel and source archive in `dist/`. The product baseline and
 future requirements are in [`docs/requirements.md`](docs/requirements.md).
+`make previews` regenerates the README SVGs from real headless TUI views using temporary
+sample data, with no network calls or actual playback. No media-card hardware is simulated.
 
 ## License
 

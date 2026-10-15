@@ -24,6 +24,7 @@ def test_config_defaults() -> None:
     assert config.scan_recursive is True
     assert config.theme == "textual-dark"
     assert config.android_notification is True
+    assert config.android_media_controls is False
     assert isinstance(config.cache_dir, Path)
     assert isinstance(config.config_dir, Path)
 

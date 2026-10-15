@@ -1,6 +1,6 @@
 # Windows validation checklist
 
-Version: `1.1.0`. Native Windows Python tests under Wine cover the Win32 named-pipe
+Release target: `1.2.0`. Earlier v1.1.0 native Windows Python tests under Wine cover the Win32 named-pipe
 exchange, read timeout, remote authentication, ownership lock, and immediate restart.
 Navigation and playback have been confirmed in Windows Terminal after installing mpv.
 The user also completed an overall functionality regression check and reported no errors.
@@ -8,12 +8,15 @@ Use the checklist below for future release and regression validation.
 
 ## Install
 
-1. Use Windows 10/11, Python 3.10 or newer, and Windows Terminal or another VT-capable terminal.
+1. Use Windows 10/11 and a VT-capable terminal. For media controls, use the tested CPython 3.14
+   setup in the [README](../README.md#install-on-windows); current WinRT wheels exclude 3.15.
 2. Install a Windows mpv build and add its directory to `PATH`.
 3. Confirm `mpv --version` works in the same terminal that will launch auen.
-4. Install the wheel: `py -m pip install --force-reinstall <wheel-path>`.
-5. Run `auen --version`; expect `auen 1.1.0`.
-6. Run `auen doctor`; required checks should be `[ok]`. Android notification support is optional.
+4. Install the wheel with `[windows]` into a Python-3.14-pinned pipx environment as documented.
+   Close/reopen Windows Terminal and check `where.exe auen` to avoid an older launcher.
+5. Run `auen --version`; expect `auen 1.2.0`.
+6. Run `auen doctor`; confirm Python 3.14, mpv, and Windows media-control dependencies `[ok]`.
+   Android notification support is optional. Doctor does not test native activation/routing.
 
 ## Playback and remote control
 
@@ -50,3 +53,17 @@ Use the checklist below for future release and regression validation.
 
 Record the Windows build, Python and mpv versions, terminal used, and any traceback when
 reporting a failure.
+
+## Media-control acceptance
+
+The earlier baseline checks were reported for v1.1.0. Version 1.2.0 adds optional Windows
+SMTC integration through the `[windows]` extra. Installation,
+limitations, and the media-key/headset checklist are in
+[media-controls.md](media-controls.md#windows-desktop-media-controls).
+The user separately confirmed core Windows 11 SMTC behavior on CPython 3.14/dev6: card title/
+progress, minimized keyboard/headset Play/Pause/Next/Previous, paused Next, Previous semantics,
+Queue/History updates and clean quit/restart. Seek has no exposed slider; hardware Stop has
+not been confirmed. The user also confirmed plain `auen` launch after the Python-3.14-pinned
+pipx setup. These are user-reported device tests of the dev6 code, not agent-side Windows
+hardware tests. The final 1.2.0 package still needs its short install/version/play/quit smoke
+check; do not infer it from the older v1.1.0 report.

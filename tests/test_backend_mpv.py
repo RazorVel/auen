@@ -1,6 +1,7 @@
 """Tests for mpv backend."""
 
 import os
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -160,6 +161,9 @@ def test_windows_play_uses_named_pipe_and_hides_console() -> None:
     with (
         patch("auen.backends.mpv.WindowsPipe") as pipe,
         patch("subprocess.Popen") as process,
+        patch("subprocess.run", return_value=subprocess.CompletedProcess(
+            [], 0, " --media-controls Flag (default: yes)\n",
+        )),
         patch("threading.Thread"),
     ):
         process.return_value.poll.return_value = None
@@ -167,8 +171,33 @@ def test_windows_play_uses_named_pipe_and_hides_console() -> None:
         backend.play(r"C:\Music\song with spaces.mp3")
         assert f"--input-ipc-server={backend._pipe_name}" in process.call_args.args[0]
         assert process.call_args.kwargs["creationflags"] == 0x08000000
+        assert "--media-controls=no" in process.call_args.args[0]
+        assert "--input-media-keys=no" in process.call_args.args[0]
         assert pipe.call_count >= 2
         backend.stop()
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_windows_media_option_probe_is_cached_and_old_mpv_stays_supported(supported: bool) -> None:
+    backend = MpvBackend()
+    backend._windows = True
+    output = " --media-controls Flag (default: yes)\n" if supported else " --no-video Flag\n"
+    with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, output)) as probe:
+        options = backend._windows_input_options()
+        assert "--input-media-keys=no" in options
+        assert ("--media-controls=no" in options) == supported
+        assert backend._windows_input_options() == options
+        probe.assert_called_once()
+        assert probe.call_args.kwargs["timeout"] == 2
+        assert probe.call_args.kwargs["creationflags"] == 0x08000000
+
+
+@pytest.mark.parametrize("error", [OSError("unavailable"), subprocess.TimeoutExpired("mpv", 2)])
+def test_windows_media_option_probe_failure_does_not_block_playback(error: Exception) -> None:
+    backend = MpvBackend()
+    backend._windows = True
+    with patch("subprocess.run", side_effect=error):
+        assert backend._windows_input_options() == ["--input-media-keys=no"]
 
 
 def test_windows_ipc_reads_split_events_and_response() -> None:

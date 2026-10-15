@@ -214,7 +214,14 @@ def is_temporary_youtube_block(error: BaseException | str) -> bool:
 
 def youtube_error_message(error: BaseException | str) -> str:
     """Remove terminal escape sequences from an otherwise useful yt-dlp error."""
-    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(error)).strip()
+    message = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(error)).strip()
+    if "unable to download" in message.casefold() and "[errno 13]" in message.casefold():
+        return (
+            "Android/your system denied the network request (permission denied). "
+            "Check Termux's VPN/firewall and network-access settings. "
+            "This is not YouTube's sign-in or rate-limit message. Offline playback still works."
+        )
+    return message
 
 
 def youtube_blocked_message(remaining: int) -> str:

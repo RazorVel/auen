@@ -24,6 +24,15 @@ def test_youtube_url_validation() -> None:
     assert not is_youtube_url("not a url")
 
 
+def test_network_permission_denial_is_not_reported_as_youtube_block() -> None:
+    error = "ERROR: id: Unable to download API page: [Errno 13] Permission denied"
+    assert not is_temporary_youtube_block(error)
+    message = youtube_error_message(error)
+    assert "denied the network request" in message
+    assert "VPN/firewall" in message
+    assert "Offline playback still works" in message
+
+
 def test_search_returns_selectable_tracks() -> None:
     service = YouTubeService()
     response = {

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from collections import deque
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from auen.models import PlaybackState, PlaybackStatus, Track
 
@@ -46,6 +47,14 @@ class PlaybackController:
         self._playback_enabled = threading.Event()
         self._playback_enabled.set()
         self._hold_after_current = threading.Event()
+        self._control_lock = threading.RLock()
+        self._ready = False
+        # This is navigation history, not the deduplicated Recently Played list
+        # or the queue's repeat-cycle history. Only successful plays enter it.
+        self._back_stack: deque[Track] = deque(maxlen=100)
+        self._previous_target: Track | None = None
+        self._desired_paused = False
+        self._stop_playback_requested = False
 
     def start(self) -> None:
         with self._lock:
@@ -72,12 +81,33 @@ class PlaybackController:
                 if not uri:
                     raise ValueError("track preparation returned no playable media")
                 self._set_current(track)
-                self._skip_requested.clear()
+                with self._control_lock:
+                    stopped = self._stop_playback_requested or not self._playback_enabled.is_set()
+                    if stopped:
+                        self._stop_playback_requested = False
+                        self.playlist.add_next(track)
+                    else:
+                        self._skip_requested.clear()
+                if stopped:
+                    self._set_current(None)
+                    continue
+                # Backend startup may take seconds. Keep the control lock free
+                # so Pause/Stop during preparation never blocks the UI loop.
                 self.backend.play(uri)
                 self.backend.set_volume(self.status.volume)
-                if self.on_track_started is not None:
+                with self._control_lock:
+                    stopped = self._stop_playback_requested
+                    if stopped:
+                        self.backend.stop()
+                    else:
+                        if self._desired_paused:
+                            self.backend.pause()
+                        self._ready = True
+                if not stopped and self.on_track_started is not None:
                     self.on_track_started(track)
             except Exception as exc:
+                with self._control_lock:
+                    self._ready = False
                 self.playlist.mark_played(track)
                 self._report_error(track, exc)
                 self._set_current(None)
@@ -96,6 +126,28 @@ class PlaybackController:
 
             if self._stop_event.is_set():
                 break
+            with self._control_lock:
+                self._ready = False
+                previous_target = self._previous_target
+                self._previous_target = None
+                skipped = self._skip_requested.is_set()
+                stopped = self._stop_playback_requested
+                self._stop_playback_requested = False
+                if stopped:
+                    self.playlist.add_next_many(
+                        [previous_target, track] if previous_target is not None else [track]
+                    )
+                elif previous_target is not None:
+                    # Queue the interrupted track behind the previous one, so
+                    # Next returns to it even with shuffle enabled.
+                    self.playlist.add_next_many([previous_target, track])
+                elif playback_error is None:
+                    if ended or skipped:
+                        self.playlist.complete(track, skipped=skipped)
+                    self._back_stack.append(track)
+            if stopped or previous_target is not None:
+                self._set_current(None)
+                continue
             if playback_error is not None:
                 with contextlib.suppress(Exception):
                     self.backend.stop()
@@ -104,10 +156,8 @@ class PlaybackController:
                 self._set_current(None)
                 self._apply_pending_hold()
                 continue
-            if ended or self._skip_requested.is_set():
-                self.playlist.complete(track)
             self._set_current(None)
-            if ended and not self._skip_requested.is_set():
+            if ended and not skipped:
                 self._apply_pending_hold()
 
     @property
@@ -122,14 +172,23 @@ class PlaybackController:
         return status
 
     def pause(self) -> None:
-        if self.current_track is not None:
-            self.backend.pause()
+        with self._control_lock:
+            self._desired_paused = True
+            if self._ready:
+                self.backend.pause()
 
     def resume(self) -> None:
-        if self.current_track is not None:
-            self.backend.resume()
-        else:
+        with self._control_lock:
+            self._desired_paused = False
+            if self.current_track is None:
+                self._stop_playback_requested = False
+            if self._ready:
+                self.backend.resume()
             self._playback_enabled.set()
+
+    def play(self) -> None:
+        """Explicit Play is idempotent: resume, or release a held queue."""
+        self.resume()
 
     def toggle_pause(self) -> None:
         if self.current_track is None and not self._playback_enabled.is_set():
@@ -142,17 +201,63 @@ class PlaybackController:
             self.pause()
 
     def skip(self) -> None:
-        self._hold_after_current.clear()
-        self._playback_enabled.set()
-        if self.current_track is not None:
-            self._skip_requested.set()
-            self.backend.stop()
+        with self._control_lock:
+            self._hold_after_current.clear()
+            self._playback_enabled.set()
+            if self._previous_target is None:
+                self._desired_paused = False
+            if self._ready:
+                self._skip_requested.set()
+                self.backend.stop()
+                self._ready = False
+
+    def previous(self) -> Literal["restarted", "previous"] | None:
+        """Restart after three seconds, otherwise retrace actual playback order."""
+        with self._control_lock:
+            if not self._ready:
+                return None
+            status = self.status
+            if status.elapsed_seconds >= 3.0 or not self._back_stack:
+                self.seek_to(0)
+                result: Literal["restarted", "previous"] = "restarted"
+            else:
+                target = self._back_stack.pop()
+                self._previous_target = target
+                self._desired_paused = status.state is PlaybackState.PAUSED
+                self._skip_requested.set()
+                try:
+                    self.backend.stop()
+                except Exception:
+                    self._previous_target = None
+                    self._back_stack.append(target)
+                    self._skip_requested.clear()
+                    raise
+                self._ready = False
+                result = "previous"
+            self._hold_after_current.clear()
+            self._playback_enabled.set()
+            return result
 
     def hold_after_current(self) -> None:
         """Finish the active track, then wait before consuming the queue."""
         if self.current_track is None:
             raise RuntimeError("nothing is playing")
         self._hold_after_current.set()
+
+    def stop_playback(self) -> None:
+        """Stop without quitting; retain the interrupted track first for Play."""
+        with self._control_lock:
+            if not self._playback_enabled.is_set() and self._stop_playback_requested:
+                return
+            if self._ready:
+                # If the backend refuses Stop, do not leave the queue held while
+                # the current audio is still running.
+                self.backend.stop()
+            self._stop_playback_requested = True
+            self._hold_after_current.clear()
+            self._playback_enabled.clear()
+            self._desired_paused = False
+            self._ready = False
 
     def cancel_hold_after_current(self) -> None:
         self._hold_after_current.clear()
@@ -198,6 +303,8 @@ class PlaybackController:
             thread.join(timeout=timeout)
             if thread.is_alive():
                 raise RuntimeError("playback worker did not stop in time")
+        with self._control_lock:
+            self._ready = False
         self._set_current(None)
         if stop_error is not None:
             raise stop_error

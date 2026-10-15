@@ -72,3 +72,11 @@ dmypy.json
 .idea/
 *.swp
 *.swo
+
+# Android toolchains and generated artifacts are installed/built separately.
+.gradle/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore

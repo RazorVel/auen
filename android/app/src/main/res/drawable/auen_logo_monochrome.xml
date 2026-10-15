@@ -1,0 +1,6 @@
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetLeft="26%" android:insetRight="26%"
+    android:insetTop="38.4%" android:insetBottom="38.4%">
+    <bitmap android:src="@drawable/auen_logo" android:gravity="fill"
+        android:tint="@android:color/white" />
+</inset>

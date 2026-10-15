@@ -36,6 +36,7 @@ class AuenConfig:
     scan_recursive: bool = True
     theme: str = "textual-dark"
     android_notification: bool = True
+    android_media_controls: bool = False
 
     @classmethod
     def load(cls, overrides: dict[str, Any] | None = None) -> "AuenConfig":
@@ -133,6 +134,7 @@ class AuenConfig:
                 f"restore_session = {_toml_bool(self.restore_session)}",
                 f"theme = {_toml_string(self.theme)}",
                 f"android_notification = {_toml_bool(self.android_notification)}",
+                f"android_media_controls = {_toml_bool(self.android_media_controls)}",
                 "",
                 "[playback]",
                 f"volume = {self.volume}",

@@ -1,0 +1,34 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'io.github.razorvel.auen.media'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'io.github.razorvel.auen.media'
+        minSdk 26
+        targetSdk 35
+        versionCode 6
+        versionName '0.6.0-prototype'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    testOptions { unitTests.returnDefaultValues = true }
+    buildFeatures { buildConfig true }
+}
+
+// Reuse the approved logo unchanged; generated copies stay outside versioned source.
+def brandingRes = layout.buildDirectory.dir('generated/auen-branding/res')
+def prepareBranding = tasks.register('prepareBranding', Copy) {
+    from(rootProject.file('../docs/assets/logo-icon.png')) { rename { 'auen_logo.png' } }
+    from(rootProject.file('../docs/assets/logo-wordmark.png')) { rename { 'auen_wordmark.png' } }
+    into(brandingRes.map { it.dir('drawable-nodpi') })
+}
+android.sourceSets.main.res.srcDir(brandingRes)
+tasks.named('preBuild').configure { dependsOn(prepareBranding) }
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+}

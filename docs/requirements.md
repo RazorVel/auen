@@ -155,16 +155,35 @@ Settings. Offline mode should remain useful when the network is unavailable.
 - A pure prompt-oriented entry point may reuse the same command dispatcher; commands must
   call session services rather than duplicate playback or persistence logic.
 - Layout responds to terminal cell dimensions. Wide terminals may show results and queue
-  together; narrow terminals use one pane at a time with compact focusable controls and
+  together; narrow terminals stack Results above Queue with compact focusable controls and
   reduced columns. The application does not change terminal font size or zoom, which are
   controlled by the terminal emulator.
 - Responsive behavior is tested at desktop and phone-sized terminal dimensions. Unicode
   decoration must have a plain-text fallback or remain understandable when a glyph is
   unavailable.
 
-## Deferred controls
+## v1.2.0 combined media-control requirements
 
 - System-wide keyboard shortcuts for play, pause, next, previous, and stop, usable while
-  another application has focus. Reuse the remote-control channel; previous-track behavior
-  needs its own playback/queue design. This is a later feature, separate from the Windows
-  compatibility and playlist import/export batch.
+  another application has focus, plus TWS/headphone media controls. Reuse the shared
+  playback actions and local remote-control channel. Previous restarts after three seconds
+  or retraces actual successful playback order near the start, preserving the interrupted
+  track as next in Queue. Explicit Play/Pause must be idempotent.
+- Desktop media keys and Termux headphone support require platform-native integration,
+  not terminal key forwarding alone. Missing optional services/permissions must not crash
+  playback. Validate Android MediaSession routing on a physical phone/headset.
+- Release these together, not as an independent Previous-only release. Core Linux,
+  Windows 11, and Android 13 acceptance passed in development builds. Setup, limits, and
+  remaining hardware checks: [media-controls.md](media-controls.md).
+- Opt-in Android companion: automatic initial connection and quiet periodic retries,
+  ready while idle, manual Disconnect suspending retries for the current run, and public
+  thumbnail artwork with bounded independent loading/cache. Missing APKs or Android start
+  restrictions must retain ordinary playback and notification fallback.
+- Optional Linux MPRIS adapter uses the desktop session bus and shared auen actions;
+  it must not grab global keys, alter window-manager bindings, or control mpv independently.
+  Hardware Stop retains the interrupted track for restart without quitting. Existing remote
+  Stop still exits. Missing D-Bus support must not prevent ordinary playback.
+- Optional Windows SMTC adapter uses a process-owned hidden top-level window, marshals native
+  callbacks onto auen's UI loop, and never takes over Terminal's window or mpv's audio session.
+  Missing native support must leave playback usable with a warning. Windows keyboard/headset
+  routing requires physical acceptance, separate from portable API-contract tests.

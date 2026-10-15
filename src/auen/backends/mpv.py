@@ -3,6 +3,7 @@
 import contextlib
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -28,6 +29,7 @@ class MpvBackend(AudioBackend):
         self._current_volume = 80
         self._end_event = threading.Event()
         self._is_playing = False
+        self._windows_media_option: bool | None = None
 
     def play(self, uri: str) -> None:
         with self._lock:
@@ -39,6 +41,7 @@ class MpvBackend(AudioBackend):
             # Start mpv in idle mode to keep it alive or just play the file
             cmd = [
                 "mpv",
+                *self._windows_input_options(),
                 "--no-video",
                 "--cache=yes",
                 "--cache-pause=yes",
@@ -75,6 +78,27 @@ class MpvBackend(AudioBackend):
             threading.Thread(target=self._monitor_process, args=(process,), daemon=True).start()
 
             self.set_volume(self._current_volume)
+
+    def _windows_input_options(self) -> list[str]:
+        if not self._windows:
+            return []
+        if self._windows_media_option is None:
+            try:
+                probe = subprocess.run(
+                    ["mpv", "--no-config", "--list-options"], stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True, errors="replace", check=False,
+                    timeout=2.0, creationflags=0x08000000,
+                )
+                self._windows_media_option = probe.returncode == 0 and bool(re.search(
+                    r"(?m)^\s*--media-controls(?:[=\s]|$)", probe.stdout,
+                ))
+            except (OSError, subprocess.TimeoutExpired):
+                self._windows_media_option = False
+        # Auen owns the media session and Queue, not its one-track mpv child.
+        # Older mpv builds have no SMTC flag: never pass an unsupported option.
+        return ["--input-media-keys=no", *(
+            ["--media-controls=no"] if self._windows_media_option else []
+        )]
 
     def _ipc_ready(self) -> bool:
         if not self._windows:

@@ -1,13 +1,16 @@
 # Termux validation checklist
 
-Version 1.1.0 has been exercised with the Termux `mpv` package on a physical Android device.
-Use this checklist for release and regression validation.
+Release target: 1.2.0. The v1.1.0 baseline was exercised with Termux mpv on a physical device.
+The combined v1.2.0 development builds and companion 0.6.0-prototype were separately tested
+on Itel RS4/Android 13. Use this checklist for subsequent regressions; final-package smoke
+testing is distinct from those earlier reports.
 
 ## Before launching
 
 1. Install a current Termux release.
-2. In Termux, run `pkg update` and `pkg install python git mpv ffmpeg`.
-3. Install auen, then run `auen doctor`.
+2. In Termux, run `pkg update`, `pkg upgrade`, and `pkg install python git mpv ffmpeg`.
+3. Install auen 1.2.0 following the [README](../README.md#install-on-android--termux), then
+   run `auen --version` and `auen doctor`. Do not skip dependencies on a fresh install.
 4. Confirm the doctor reports mpv and the yt-dlp Python package as available.
 5. For optional notification controls, install the Termux:API companion app from the same
    source as Termux, then run `pkg install termux-api`. Confirm `auen doctor` reports the
@@ -21,7 +24,8 @@ Use this checklist for release and regression validation.
 3. Pause and resume with Space. Confirm the progress display continues to update.
 4. Press `[` and `]`, then use `g`, and confirm seeking works when mpv is selected.
 5. Press `n` with several queued tracks and confirm the next track starts without a
-   traceback or overlapping audio.
+   traceback or overlapping audio. Test `b` near the start and after three seconds, then
+   repeat with Shuffle and paused playback.
 6. Quit while audio is active and confirm playback stops immediately.
 7. Reopen auen and confirm the queue and prior position recover without autoplay.
 
@@ -72,3 +76,24 @@ Use this checklist for release and regression validation.
 
 Record the Android version, Termux version, terminal dimensions, and any traceback when
 reporting a failure.
+
+## Optional headset companion
+
+Follow [the companion setup](../android/README.md). The tested APK remains 0.6.0-prototype,
+unchanged for auen 1.2.0; no reinstall is needed if that same APK is already installed.
+
+1. Enable **Android headphone controls (APK)** in F2. Launch/restart auen: connection should
+   be automatic and stay ready before playback. Grant notification permission if prompted.
+2. Play cached tracks to avoid YouTube uncertainty. Minimize Termux and lock the phone;
+   test headset Play/Pause, Next and Previous. Routing should report `running` while active.
+3. Check notification artwork and Play/Pause feedback. If Android exposes a progress slider,
+   seek while playing and paused. A delayed seek must not affect a different track.
+4. Disconnect: audio continues, automatic retry stays suspended for this run, and Termux:API
+   fallback controls return when enabled. Connect manually or restart auen to resume pairing.
+5. Quit from Termux, leave the companion untouched, and restart several times. Reconnection
+   must not hang; a second auen instance should refuse clearly without starting playback.
+6. Without the APK, or with it unavailable, verify a warning and normal playback/clean quit.
+
+Core checks above were reported passed on the tested phone. Calls, other media apps, Bluetooth
+reconnect, OEM battery limits, and broader device coverage still require physical testing.
+Never include pairing credentials in diagnostic screenshots.

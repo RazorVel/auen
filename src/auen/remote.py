@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-REMOTE_COMMANDS = {"toggle", "next", "stop", "status"}
+REMOTE_COMMANDS = {"play", "pause", "toggle", "next", "previous", "stop", "status"}
 _MAX_MESSAGE_BYTES = 64 * 1024
 
 
@@ -42,12 +42,24 @@ class RemoteControlServer:
         handler: Callable[[str], dict[str, Any]],
         *,
         tcp: bool | None = None,
+        endpoint_name: str = "control.json",
+        parameter_commands: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
     ) -> None:
         self._tcp = os.name == "nt" if tcp is None else tcp
-        self.path = state_dir / "control.json" if self._tcp else control_socket_path(state_dir)
+        if (
+            not endpoint_name.endswith(".json")
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789-."
+                for character in endpoint_name
+            )
+            or endpoint_name.startswith(".")
+        ):
+            raise ValueError("invalid remote endpoint name")
+        self.path = state_dir / endpoint_name if self._tcp else control_socket_path(state_dir)
         self._token = secrets.token_hex(32) if self._tcp else ""
         self._address: tuple[str, int] | str = str(self.path)
         self.handler = handler
+        self.parameter_commands = parameter_commands or {}
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -107,26 +119,7 @@ class RemoteControlServer:
         self._start_thread()
 
     def _lock_endpoint(self) -> None:
-        lock_file = (self.path.parent / "control.lock").open("a+b")
-        try:
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            if sys.platform == "win32":
-                import msvcrt
-
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            lock_file.close()
-            raise RuntimeError(
-                "another auen instance is already accepting remote commands"
-            ) from exc
-        self._endpoint_lock = lock_file
+        self._endpoint_lock = _acquire_file_lock(self.path.with_suffix(".lock"))
 
     def _unlock_endpoint(self) -> None:
         if self._endpoint_lock is not None:
@@ -167,9 +160,14 @@ class RemoteControlServer:
                 if not isinstance(token, str) or not hmac.compare_digest(token, self._token):
                     return {"ok": False, "error": "remote authentication failed"}
             command = request.get("command")
-            if not isinstance(command, str) or command not in REMOTE_COMMANDS:
+            if not isinstance(command, str):
                 return {"ok": False, "error": "unsupported remote command"}
-            response = self.handler(command)
+            if command in self.parameter_commands:
+                response = self.parameter_commands[command](request)
+            elif command in REMOTE_COMMANDS:
+                response = self.handler(command)
+            else:
+                return {"ok": False, "error": "unsupported remote command"}
             return {"ok": True, **response}
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
@@ -197,6 +195,61 @@ class RemoteControlServer:
             with contextlib.suppress(OSError):
                 self.path.unlink()
         self._unlock_endpoint()
+
+
+class InstanceLock:
+    """Guard shared recovery state before constructing a second player/UI."""
+
+    def __init__(self, state_dir: Path) -> None:
+        self.path = state_dir / "instance.lock"
+        self._file: BinaryIO | None = None
+
+    def __enter__(self) -> InstanceLock:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = _acquire_file_lock(self.path)
+        try:
+            # Older builds did not own instance.lock; still detect their live
+            # control endpoint before restoring the same persisted Queue.
+            if os.name == "nt":
+                probe = _acquire_file_lock(self.path.parent / "control.lock")
+                probe.close()
+            elif _socket_accepts_connections(control_socket_path(self.path.parent)):
+                raise RuntimeError(
+                    "another auen instance is already running; use that terminal or 'auen remote'"
+                )
+        except (OSError, RuntimeError):
+            self._file.close()
+            self._file = None
+            raise
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+
+def _acquire_file_lock(path: Path) -> BinaryIO:
+    lock_file = path.open("a+b")
+    try:
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        lock_file.close()
+        raise RuntimeError(
+            "another auen instance is already running; use that terminal or 'auen remote'"
+        ) from exc
+    return lock_file
 
 
 def send_remote_command(

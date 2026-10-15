@@ -2,6 +2,7 @@
 
 import threading
 import time
+from unittest.mock import patch
 
 from auen.models import RepeatMode, Track, TrackSource
 from auen.playlist import Playlist
@@ -77,6 +78,42 @@ def test_shuffle_off_preserves_order() -> None:
 
     pulled = [playlist.next() for _ in range(5)]
     assert pulled == tracks
+
+
+def test_navigation_sequence_overrides_shuffle_without_changing_other_rows() -> None:
+    playlist = Playlist()
+    playlist.shuffle = True
+    normal = [make_track("waiting-one"), make_track("waiting-two")]
+    back = [make_track("previous"), make_track("interrupted")]
+    playlist.add_many(normal)
+    playlist.add_next_many(back)
+    with patch("auen.playlist.random.randrange", return_value=1) as choose:
+        assert playlist.next() is back[0]
+        assert playlist.next() is back[1]
+        choose.assert_not_called()
+        assert playlist.queue_list == normal
+        assert playlist.next() is normal[1]
+        choose.assert_called_once()
+
+
+def test_removed_navigation_entry_does_not_leave_stale_priority() -> None:
+    playlist = Playlist()
+    playlist.shuffle = True
+    normal = [make_track("one"), make_track("two")]
+    playlist.add_many(normal)
+    playlist.add_next(make_track("removed"))
+    playlist.remove(0)
+    with patch("auen.playlist.random.randrange", return_value=1):
+        assert playlist.next() is normal[1]
+
+
+def test_skipping_repeat_one_records_track_without_requeuing() -> None:
+    playlist = Playlist()
+    playlist.repeat_mode = RepeatMode.ONE
+    track = make_track("skip-repeat")
+    playlist.complete(track, skipped=True)
+    assert playlist.history_list == [track]
+    assert playlist.queue_list == []
 
 
 def test_remove_by_index() -> None:
