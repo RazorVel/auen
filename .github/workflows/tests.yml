@@ -52,6 +52,22 @@ jobs:
       - name: Type check
         run: python -m mypy src docs/generate_previews.py
       - name: Test (including native mpv IPC)
-        run: python -m pytest -q
+        run: python -m pytest -q --junitxml=test-results.xml
+      - name: Report test failures
+        if: failure()
+        shell: python
+        run: |
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path('test-results.xml')
+          if report.is_file():
+              for case in ElementTree.parse(report).iter('testcase'):
+                  for detail in list(case):
+                      if detail.tag not in {'failure', 'error'}:
+                          continue
+                      message = f"{case.get('classname')}.{case.get('name')}: {detail.text or ''}"
+                      message = message[:6000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f'::error::{message}')
       - name: Build distributions
         run: python -m build

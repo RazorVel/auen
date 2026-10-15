@@ -23,6 +23,11 @@ Check GitHub's Linux/Windows CI afterward; tagging and publication are not autho
   Local focused configuration/CLI regression: 27 passed. Ruff clean; strict type checks
   pass for Linux (30 files including preview generator) and win32 (29 package files),
   with typed tomli installed. No playback policy or recovery behavior changed.
+- Follow-up `a4d0278` pushed; CI run `38734486045` confirms both Linux jobs pass and both
+  Windows jobs pass installation, backend discovery, lint, and type checking. Windows then
+  fails in pytest. Public API summaries omit the traceback and raw logs require login.
+  Added JUnit-backed, newline-escaped failure annotations to obtain exact diagnostics and
+  keep future runner failures observable. Network/playback hardening remains deferred.
 - User accepted the recommendation to retain the tested companion 0.6.0-prototype APK
   unchanged. Python version is now 1.2.0; the independent native version remains 0.6.0.
 - Rechecked: `/tmp/auen-android-build.ypveNy` and its signing key are gone, as is the old
