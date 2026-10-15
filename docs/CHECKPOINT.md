@@ -28,6 +28,11 @@ Check GitHub's Linux/Windows CI afterward; tagging and publication are not autho
   fails in pytest. Public API summaries omit the traceback and raw logs require login.
   Added JUnit-backed, newline-escaped failure annotations to obtain exact diagnostics and
   keep future runner failures observable. Network/playback hardening remains deferred.
+- Diagnostics commit `0585094`, run `38735034944`, exposes the only Windows pytest failure:
+  the pre-existing `test_config_xdg_paths` assumes every cache path ends in `auen`, but
+  platformdirs correctly uses `auen\\auen\\Cache` on Windows. Replaced that Linux-only
+  basename assumption with the platformdirs contract for cache/config/state on every OS.
+  No application directory or user data changed. Both Linux jobs remain green.
 - User accepted the recommendation to retain the tested companion 0.6.0-prototype APK
   unchanged. Python version is now 1.2.0; the independent native version remains 0.6.0.
 - Rechecked: `/tmp/auen-android-build.ypveNy` and its signing key are gone, as is the old

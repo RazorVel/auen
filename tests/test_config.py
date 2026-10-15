@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from platformdirs import user_cache_dir, user_config_dir, user_state_dir
 
 from auen.config import AuenConfig
 
@@ -82,10 +83,12 @@ def test_config_cli_overrides(tmp_path: Path) -> None:
     assert config.shuffle is True
 
 
-def test_config_xdg_paths() -> None:
+def test_config_uses_platform_directories() -> None:
     config = AuenConfig()
-    assert config.cache_dir.name == "auen"
-    assert config.config_dir.name == "auen"
+    # Windows cache paths end in Cache; Linux/XDG paths end in the app name.
+    assert config.cache_dir == Path(user_cache_dir("auen"))
+    assert config.config_dir == Path(user_config_dir("auen"))
+    assert config.state_dir == Path(user_state_dir("auen"))
 
 
 def test_config_migrates_legacy_loop_setting(tmp_path: Path) -> None:
