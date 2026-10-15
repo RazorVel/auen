@@ -33,6 +33,12 @@ Check GitHub's Linux/Windows CI afterward; tagging and publication are not autho
   platformdirs correctly uses `auen\\auen\\Cache` on Windows. Replaced that Linux-only
   basename assumption with the platformdirs contract for cache/config/state on every OS.
   No application directory or user data changed. Both Linux jobs remain green.
+- Commit `0318593`, run `38735669031`: Linux 3.10/3.14 and Windows 3.14 passed; Windows 3.10
+  exposed an intermittent pre-existing focus-guide test timing failure. The same test passed
+  in earlier Windows runs. Its guide update is deferred with call_after_refresh, beyond a
+  focus event. Updated the test to settle initial focus and wait up to three seconds for
+  the actual visible guide on each pane, retaining all visibility/content assertions and
+  exercising real events rather than invoking the updater or skipping the test.
 - User accepted the recommendation to retain the tested companion 0.6.0-prototype APK
   unchanged. Python version is now 1.2.0; the independent native version remains 0.6.0.
 - Rechecked: `/tmp/auen-android-build.ypveNy` and its signing key are gone, as is the old

@@ -2076,14 +2076,24 @@ async def test_context_guide_follows_focused_pane_and_view(tmp_path: Path) -> No
     )
 
     async with app.run_test() as pilot:
+        async def wait_for_guide(pane_id: str) -> None:
+            # Guide visibility is queued after refresh, beyond the focus message itself.
+            pane = app.query_one(pane_id)
+            deadline = time.monotonic() + 3
+            while not pane.has_class("guide-visible") and time.monotonic() < deadline:
+                await pilot.pause()
+            assert pane.has_class("guide-visible")
+
+        await pilot.pause()
         results = app.query_one("#results", DataTable)
         results.focus()
-        await pilot.pause()
+        await wait_for_guide("#results-pane")
         assert app.query_one("#results-pane").has_class("guide-visible")
         assert not app.query_one("#queue-pane").has_class("guide-visible")
         assert "Enter queue/open" in str(app.query_one("#results-guide").render())
 
         await pilot.press("tab")
+        await wait_for_guide("#queue-pane")
         assert not app.query_one("#results-pane").has_class("guide-visible")
         assert app.query_one("#queue-pane").has_class("guide-visible")
 
