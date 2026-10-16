@@ -1,5 +1,8 @@
 """Tests for shared anonymous YouTube request pacing and cooldown."""
 
+import threading
+from concurrent.futures import CancelledError, ThreadPoolExecutor
+
 import pytest
 
 from auen.youtube_policy import YouTubeCooldownError, YouTubeRequestGate
@@ -30,6 +33,17 @@ def test_gate_spaces_request_starts() -> None:
     gate.wait_turn()
 
     assert fake.sleeps == [1.25]
+
+
+def test_cancel_interrupts_request_spacing() -> None:
+    gate = YouTubeRequestGate(minimum_interval_seconds=30)
+    gate.wait_turn()
+    cancelled = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(gate.wait_turn, cancelled=cancelled)
+        cancelled.set()
+        with pytest.raises(CancelledError):
+            future.result(timeout=1)
 
 
 def test_gate_fails_fast_until_cooldown_expires() -> None:

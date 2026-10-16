@@ -337,6 +337,8 @@ def test_failed_tracks_are_not_previous_targets(
     player.prepare = prepare
     playlist.add_many([failed, good])
     player.start()
+    wait_until(lambda: player.queue_held)
+    player.skip()
     wait_until(lambda: player.current_track is good and player._ready)
     assert player.previous() == "restarted"
     assert backend.played == [good.uri]
@@ -593,13 +595,21 @@ def test_preparation_error_is_reported_without_killing_worker() -> None:
         on_error=lambda track, error: errors.append((track, error)),
     )
     player.start()
-    wait_until(lambda: backend.played == [good.uri])
-
-    assert errors[0][0] is failed
-    assert str(errors[0][1]) == "unavailable"
-    assert playlist.history_list == [failed]
-    assert started == [good]
-    player.close()
+    try:
+        wait_until(lambda: len(errors) == 1)
+        assert errors[0][0] is failed
+        assert str(errors[0][1]) == "unavailable"
+        assert playlist.queue_list == [failed, good]
+        assert playlist.history_list == []
+        assert started == []
+        assert player.queue_held
+        time.sleep(0.3)
+        assert len(errors) == 1  # No automatic retry or cascading skips.
+        player.skip()
+        wait_until(lambda: started == [good])
+        assert backend.played == [good.uri]
+    finally:
+        player.close()
 
 
 def test_status_error_is_reported_without_killing_worker() -> None:
@@ -616,12 +626,79 @@ def test_status_error_is_reported_without_killing_worker() -> None:
     )
     player.start()
 
-    wait_until(lambda: backend.played == [failed.uri, good.uri])
+    try:
+        wait_until(lambda: len(errors) == 1)
+        assert errors[0][0] is failed
+        assert str(errors[0][1]) == "status unavailable"
+        assert playlist.queue_list == [failed, good]
+        assert playlist.history_list == []
+        assert player.queue_held
+        player.play()
+        wait_until(lambda: backend.played == [failed.uri, failed.uri])
+        assert playlist.queue_list == [good]
+    finally:
+        player.close()
 
-    assert errors[0][0] is failed
-    assert str(errors[0][1]) == "status unavailable"
-    assert playlist.history_list == [failed]
-    player.close()
+
+@pytest.mark.parametrize("repeat", list(RepeatMode))
+def test_retry_after_network_recovery_retains_duplicates_and_works_with_shuffle(
+    repeat: RepeatMode,
+) -> None:
+    playlist = Playlist()
+    failed, good = make_track("failed"), make_track("good")
+    playlist.add_next_many([failed, failed, good])
+    playlist.shuffle = True
+    playlist.repeat_mode = repeat
+    backend = FakeBackend()
+    recovered = threading.Event()
+
+    def prepare(track: Track) -> str:
+        if not recovered.is_set():
+            raise RuntimeError("network unavailable")
+        return track.uri
+
+    player = PlaybackController(playlist, backend, prepare=prepare)
+    player.start()
+    try:
+        wait_until(lambda: player.queue_held)
+        assert playlist.queue_list == [failed, failed, good]
+        recovered.set()
+        player.toggle_pause()
+        wait_until(lambda: player._ready)
+        assert backend.played == [failed.uri]
+        assert playlist.queue_list == [failed, good]
+    finally:
+        player.close()
+
+
+def test_quit_during_preparation_cancels_and_cannot_start_late_audio() -> None:
+    playlist = Playlist()
+    track = make_track("preparing")
+    playlist.add(track)
+    backend = FakeBackend()
+    entered, cancelled = threading.Event(), threading.Event()
+
+    def prepare(track: Track) -> str:
+        entered.set()
+        assert cancelled.wait(2)
+        return track.uri
+
+    player = PlaybackController(
+        playlist, backend, prepare=prepare, cancel_prepare=cancelled.set,
+    )
+    player.start()
+    try:
+        assert entered.wait(2)
+        start = time.monotonic()
+        player.close()
+        assert time.monotonic() - start < 1
+        assert backend.played == []
+        assert playlist.queue_list == [track]
+        assert player.current_track is None
+        assert player._thread is not None and not player._thread.is_alive()
+    finally:
+        cancelled.set()
+        player.close()
 
 
 def test_rejects_invalid_volume() -> None:

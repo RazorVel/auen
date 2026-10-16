@@ -2270,8 +2270,11 @@ class AuenApp(App[None]):
             future = self.session.enqueue(track, session_mode=self.current_session_mode)
         else:
             future = self.session.enqueue_next(track, session_mode=self.current_session_mode)
-        if play_now and self.session.player is not None and self.session.current_track is not None:
-            self.session.player.skip()
+        if play_now and self.session.player is not None:
+            if self.session.current_track is not None:
+                self.session.player.skip()
+            else:
+                self.session.player.play()
         self._refresh_queue()
         title = "Added to queue" if append else "Playing now" if play_now else "Playing next"
         self.notify(track.title, title=title)
@@ -2526,7 +2529,7 @@ class AuenApp(App[None]):
         if threading.current_thread() is threading.main_thread():
             self._handle_download_finished(exception)
         else:
-            self.call_from_thread(self._handle_download_finished, exception)
+            self.call_later(self._handle_download_finished, exception)
 
     def _handle_download_finished(self, exception: BaseException | None) -> None:
         if exception is None:
@@ -2869,12 +2872,14 @@ class AuenApp(App[None]):
     def _playback_track_changed(self, track: Track | None) -> None:
         if not self.is_running:
             return
-        self.call_from_thread(self._show_now_playing, track)
-        self.call_from_thread(self._refresh_queue)
+        # Post without waiting: shutdown can be joining this playback worker
+        # on the UI thread, so a synchronous cross-thread call would deadlock.
+        self.call_later(self._show_now_playing, track)
+        self.call_later(self._refresh_queue)
 
     def _playback_history_changed(self) -> None:
         if self.is_running:
-            self.call_from_thread(self._refresh_history_if_visible)
+            self.call_later(self._refresh_history_if_visible)
 
     def _refresh_history_if_visible(self) -> None:
         if self._showing_history:
@@ -2902,6 +2907,7 @@ class AuenApp(App[None]):
             self._update_android_media_snapshot(track, PlaybackState.STOPPED)
             self._refresh_android_notification(track, PlaybackState.STOPPED)
             self._reset_progress()
+            self._refresh_now_playing_message()
             return
         try:
             status = player.status
@@ -2974,9 +2980,9 @@ class AuenApp(App[None]):
 
     def _playback_failed(self, track: Track, error: Exception) -> None:
         if self.is_running:
-            self.call_from_thread(
+            self.call_later(
                 self.notify,
-                str(error),
+                f"{error}\nQueue kept. Space: retry · n: skip · Enter: play another Queue track.",
                 title=f"Could not play {track.title}",
                 severity="error",
             )
@@ -3121,6 +3127,8 @@ class AuenApp(App[None]):
             if track is None
             else f"{state_symbol} {_terminal_safe_title(track.title)}"
         )
+        if track is None and self.session.player is not None and self.session.player.failure_held:
+            message = "⚠ Playback held · Space retry · n skip"
         indicator = self._sleep_indicator()
         return f"{message} · {indicator}" if indicator else message
 
@@ -3683,6 +3691,9 @@ class AuenApp(App[None]):
                 self.session.player.cancel_hold_after_current()
                 self.notify("Cancelled because you skipped the track", title="Sleep timer")
             self.session.player.skip()
+            self.session.save()
+            self._refresh_queue()
+            self._refresh_now_playing_message()
 
     @on(Button.Pressed, "#next-track")
     def next_button_pressed(self) -> None:

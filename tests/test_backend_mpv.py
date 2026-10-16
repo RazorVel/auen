@@ -2,6 +2,9 @@
 
 import os
 import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,6 +13,66 @@ from auen.backends import detect_backend
 from auen.backends.mpv import MpvBackend
 from auen.backends.termux import TermuxBackend
 from auen.models import PlaybackState
+
+
+@pytest.mark.parametrize("returncode", [0, 1, 2])
+def test_mpv_abnormal_exit_is_not_natural_completion(returncode: int) -> None:
+    backend = MpvBackend()
+    process = MagicMock()
+    process.wait.return_value = returncode
+    backend._process = process
+    backend._monitor_process(process)
+    if returncode:
+        with pytest.raises(RuntimeError, match=f"code {returncode}"):
+            backend.wait_for_end(timeout=0)
+    else:
+        assert backend.wait_for_end(timeout=0)
+
+
+def test_old_process_exit_cannot_poison_replacement() -> None:
+    backend = MpvBackend()
+    old, replacement = MagicMock(), MagicMock()
+    old.wait.return_value = 2
+    backend._process = replacement
+    backend._monitor_process(old)
+    assert backend._process is replacement
+    assert not backend.wait_for_end(timeout=0)
+
+
+def test_stop_interrupts_mpv_startup_instead_of_waiting_for_socket_timeout() -> None:
+    backend = MpvBackend()
+    backend._windows = False
+    entered = threading.Event()
+    process = MagicMock()
+    process.poll.return_value = None
+
+    def not_ready():
+        entered.set()
+        return False
+
+    with (
+        patch("auen.backends.mpv.subprocess.Popen", return_value=process),
+        patch.object(backend, "_ipc_ready", side_effect=not_ready),
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        future = executor.submit(backend.play, "/unused")
+        assert entered.wait(2)
+        start = time.monotonic()
+        backend.stop()
+        with pytest.raises(RuntimeError, match="startup cancelled"):
+            future.result(timeout=1)
+        assert time.monotonic() - start < 1
+        assert backend._process is None
+
+
+def test_status_transport_failure_does_not_repeat_four_ipc_timeouts() -> None:
+    backend = MpvBackend()
+    backend._process = MagicMock()
+    backend._process.poll.return_value = None
+    with patch.object(backend, "_send_command", return_value={"error": "timed out"}) as send:
+        with pytest.raises(RuntimeError, match="unavailable"):
+            backend.get_status()
+        send.assert_called_once()
 
 
 @patch("subprocess.Popen")

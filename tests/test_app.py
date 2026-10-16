@@ -79,6 +79,55 @@ def make_app(tmp_path: Path, *, mode: SessionMode) -> AuenApp:
     )
 
 
+@pytest.mark.parametrize("action", ["space", "n", "enter", "skip_last"])
+async def test_playback_failure_shows_hold_and_accepts_explicit_recovery(
+    tmp_path: Path, action: str,
+) -> None:
+    from tests.test_player import FakeBackend
+
+    app = make_app(tmp_path, mode=SessionMode.STREAM_ONLY)
+    backend = FakeBackend()
+    app.backend = backend
+    failed = Track(title="Network", source=TrackSource.YOUTUBE, uri="https://youtu.be/failure")
+    offline = Track(title="Offline", source=TrackSource.LOCAL, uri="/offline.opus")
+    tracks = [failed] if action == "skip_last" else [failed, offline]
+    app.session.enqueue_many(tracks)
+    with patch.object(
+        app.session.youtube, "resolve", side_effect=RuntimeError("offline"),
+    ) as resolve:
+        async with app.run_test() as pilot:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                await pilot.pause(0.02)
+                if "Playback held" in str(app.query_one("#now-playing", Static).render()):
+                    break
+            else:
+                pytest.fail("Playback hold was not rendered")
+            assert app.session.playlist.queue_list == tracks
+            assert backend.played == []
+            resolve.side_effect = None
+            resolve.return_value = failed
+            queue = app.query_one("#queue", DataTable)
+            queue.focus()
+            if action == "enter":
+                queue.move_cursor(row=1)
+            await pilot.press("n" if action == "skip_last" else action)
+            if action == "skip_last":
+                assert app.session.playlist.queue_list == []
+                assert app.session.state.load().queue == []
+                assert queue.row_count == 0
+                assert "Playback held" not in str(app.query_one("#now-playing", Static).render())
+                return
+            expected = failed if action == "space" else offline
+            deadline = time.monotonic() + 3
+            while backend.played != [expected.uri] and time.monotonic() < deadline:
+                await pilot.pause(0.02)
+            assert backend.played == [expected.uri]
+            assert app.session.player is not None and not app.session.player.queue_held
+            if action == "enter":
+                assert app.session.playlist.queue_list == [failed]
+
+
 async def test_linux_media_snapshot_commands_seek_and_non_quitting_stop(tmp_path: Path) -> None:
     pytest.importorskip("dbus_next")
     from auen.linux_media import OBJECT_PATH

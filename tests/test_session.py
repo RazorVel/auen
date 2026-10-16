@@ -1,11 +1,13 @@
 """Tests for application-level media and recovery coordination."""
 
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,9 +15,89 @@ from auen.backends.base import AudioBackend, BackendCapabilities
 from auen.cache import CacheManager
 from auen.config import AuenConfig
 from auen.downloads import DownloadManager
+from auen.media.youtube import YouTubeServiceError
 from auen.models import PlaybackState, PlaybackStatus, SessionMode, Track, TrackSource
 from auen.session import AuenSession
 from auen.state import StateStore
+from auen.youtube_policy import YouTubeRequestGate
+
+
+def test_failed_queue_can_retry_select_offline_and_restore_without_loss(tmp_path: Path) -> None:
+    config = AuenConfig(
+        config_dir=tmp_path, cache_dir=tmp_path / "cache", state_dir=tmp_path,
+        session_mode=SessionMode.STREAM_ONLY.value,
+    )
+    blocked, waiting = make_track("blocked"), make_track("waiting")
+    local = Track(title="offline", source=TrackSource.LOCAL, uri="/offline.opus")
+    youtube = MagicMock()
+    youtube.resolve.side_effect = YouTubeServiceError("connection unavailable")
+    backend = FakeBackend()
+    with AuenSession(config, youtube=youtube) as session:
+        session.enqueue_many([blocked, waiting])
+        player = session.start_playback(backend)
+        wait_until(lambda: player.queue_held)
+        assert session.playlist.queue_list == [blocked, waiting]
+        assert session.recent_history() == []
+        session.enqueue(local)
+        assert player.queue_held
+        session.play_queued_now(2)
+        wait_until(lambda: player._ready)
+        assert backend.played == [local.uri]
+        assert session.playlist.queue_list == [blocked, waiting]
+        assert youtube.resolve.call_count == 1
+
+    recovered = MagicMock()
+    recovered.resolve.side_effect = lambda track: track
+    with AuenSession(config, youtube=recovered) as restored:
+        # Both the interrupted offline track and the failed network track survive.
+        assert [track.track_id for track in restored.playlist.queue_list] == [
+            local.track_id, blocked.track_id, waiting.track_id,
+        ]
+        fresh_backend = FakeBackend()
+        restored.start_playback(fresh_backend)
+        wait_until(lambda: restored.player is not None and restored.player._ready)
+        restored.play_queued_now(0)
+        wait_until(lambda: fresh_backend.played == [local.uri, blocked.uri])
+
+
+def test_close_cancels_simultaneous_search_playback_and_download(tmp_path: Path) -> None:
+    config = AuenConfig(
+        config_dir=tmp_path, cache_dir=tmp_path / "cache", state_dir=tmp_path,
+        session_mode=SessionMode.STREAM_ONLY.value,
+    )
+    session = AuenSession(config, request_gate=YouTubeRequestGate(minimum_interval_seconds=0))
+    track = make_track("stalled")
+    session.enqueue(track)
+    original_popen = subprocess.Popen
+    launched: list[subprocess.Popen] = []
+
+    def launch(_command, **kwargs):
+        process = original_popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+        launched.append(process)
+        return process
+
+    try:
+        with patch("auen.media.extractor.subprocess.Popen", side_effect=launch):
+            search = session.submit_search("stalled")
+            download = session.save_offline(track)
+            backend = FakeBackend()
+            session.start_playback(backend)
+            wait_until(lambda: len(launched) == 3)
+            start = time.monotonic()
+            session.close()
+            assert time.monotonic() - start < 3
+            assert all(process.poll() is not None for process in launched)
+            assert search.done() and download.done()
+            assert backend.played == []
+            assert session.player is not None
+            assert session.player._thread is not None and not session.player._thread.is_alive()
+        with StateStore(tmp_path / "state.sqlite3") as state:
+            snapshot = state.load()
+            assert snapshot.current_track is None
+            assert [item.track_id for item in snapshot.queue] == [track.track_id]
+        assert not list((config.cache_dir / "tmp").glob("download-*"))
+    finally:
+        session.close()
 
 
 def make_dependencies(tmp_path: Path) -> tuple[StateStore, CacheManager, DownloadManager]:

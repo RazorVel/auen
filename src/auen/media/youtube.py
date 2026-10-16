@@ -6,9 +6,7 @@ import re
 from typing import Any
 from urllib.parse import quote_plus, urlparse
 
-from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
-from yt_dlp.utils import DownloadError  # type: ignore[import-untyped]
-
+from auen.media.extractor import ExtractionError, Extractor
 from auen.models import CollectionKind, MediaCollection, SearchItem, Track, TrackSource
 from auen.youtube_policy import YouTubeCooldownError, YouTubeRequestGate
 
@@ -24,6 +22,10 @@ class YouTubeService:
 
     def __init__(self, *, request_gate: YouTubeRequestGate | None = None) -> None:
         self.request_gate = request_gate or YouTubeRequestGate()
+        self.extractor = Extractor()
+
+    def close(self) -> None:
+        self.extractor.close()
 
     def search(self, query: str, *, limit: int = 5) -> list[SearchItem]:
         query = query.strip()
@@ -102,12 +104,11 @@ class YouTubeService:
         if limit is not None:
             options["playlistend"] = limit
         try:
-            self.request_gate.wait_turn()
-            with YoutubeDL(options) as ydl:
-                result = ydl.extract_info(target, download=False)
+            self.request_gate.wait_turn(cancelled=self.extractor.cancelled)
+            result = self.extractor.extract(target, options)
         except YouTubeCooldownError as exc:
             raise YouTubeServiceError(str(exc)) from exc
-        except DownloadError as exc:
+        except ExtractionError as exc:
             if is_temporary_youtube_block(exc):
                 remaining = self.request_gate.block()
                 raise YouTubeServiceError(youtube_blocked_message(remaining)) from exc

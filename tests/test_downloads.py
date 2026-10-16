@@ -3,13 +3,13 @@
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from yt_dlp.utils import DownloadError
 
 from auen.cache import CacheManager
 from auen.downloads import DownloadManager, DownloadServiceError
+from auen.media.extractor import ExtractionError
 from auen.models import Track, TrackSource
 from auen.youtube_policy import YouTubeRequestGate
 
@@ -148,20 +148,17 @@ def test_rejects_non_youtube_tracks(tmp_path: Path) -> None:
 
 def test_download_prefers_android_compatible_audio(tmp_path: Path) -> None:
     track = make_track("compatible")
-    extractor = MagicMock()
-    extractor.extract_info.side_effect = lambda *_args, **_kwargs: (
-        tmp_path / "media.m4a"
-    ).write_bytes(b"audio")
+    def write_audio(*_args, **_kwargs):
+        (tmp_path / "media.m4a").write_bytes(b"audio")
 
     with (
         CacheManager(tmp_path / "cache") as cache,
         DownloadManager(cache) as downloads,
-        patch("auen.downloads.YoutubeDL") as youtube_dl,
+        patch.object(downloads.extractor, "extract", side_effect=write_audio) as extract,
     ):
-        youtube_dl.return_value.__enter__.return_value = extractor
         downloaded = downloads._download_file(track, tmp_path)
 
-    options = youtube_dl.call_args.args[0]
+    options = extract.call_args.args[1]
     assert options["format"].startswith("bestaudio[ext=m4a]/")
     assert downloaded.suffix == ".m4a"
 
@@ -169,20 +166,17 @@ def test_download_prefers_android_compatible_audio(tmp_path: Path) -> None:
 def test_download_block_starts_shared_cooldown(tmp_path: Path) -> None:
     track = make_track("blocked")
     gate = YouTubeRequestGate(minimum_interval_seconds=0, cooldown_seconds=120)
-    extractor = MagicMock()
-    extractor.extract_info.side_effect = DownloadError(
-        "ERROR: HTTP Error 429: Too Many Requests"
-    )
 
     with (
         CacheManager(tmp_path / "cache") as cache,
         DownloadManager(cache, request_gate=gate) as downloads,
-        patch("auen.downloads.YoutubeDL") as youtube_dl,
+        patch.object(downloads.extractor, "extract", side_effect=ExtractionError(
+            "ERROR: HTTP Error 429: Too Many Requests"
+        )) as extract,
     ):
-        youtube_dl.return_value.__enter__.return_value = extractor
         with pytest.raises(DownloadServiceError, match="temporarily blocked"):
             downloads._download_file(track, tmp_path)
         with pytest.raises(DownloadServiceError, match="cooling down"):
             downloads._download_file(track, tmp_path)
 
-    assert extractor.extract_info.call_count == 1
+    assert extract.call_count == 1

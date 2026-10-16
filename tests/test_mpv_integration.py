@@ -2,9 +2,11 @@
 
 import shutil
 import subprocess
+import threading
 import time
 import wave
 from collections.abc import Callable
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +16,60 @@ from auen.backends.mpv import MpvBackend
 from auen.models import PlaybackState, Track, TrackSource
 from auen.player import PlaybackController
 from auen.playlist import Playlist
+
+
+@pytest.mark.skipif(shutil.which("mpv") is None, reason="mpv is not installed")
+def test_native_rejected_stream_holds_queue_and_offline_skip_recovers(tmp_path: Path) -> None:
+    class Rejected(BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(0.2)
+            self.send_error(403)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Rejected)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    audio = tmp_path / "offline.wav"
+    with wave.open(str(audio), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(8000)
+        output.writeframes(b"\0\0" * 8000 * 30)
+    failed = Track(
+        title="Rejected", source=TrackSource.URL,
+        uri=f"http://127.0.0.1:{server.server_port}/rejected",
+    )
+    offline = Track(title="Offline", source=TrackSource.LOCAL, uri=str(audio))
+    playlist = Playlist()
+    playlist.add_many([failed, offline])
+    backend = MpvBackend()
+    player = PlaybackController(playlist, backend)
+    original_popen = subprocess.Popen
+
+    def silent_mpv(command, **kwargs):
+        return original_popen([*command[:1], "--ao=null", *command[1:]], **kwargs)
+
+    try:
+        with patch("auen.backends.mpv.subprocess.Popen", side_effect=silent_mpv):
+            player.start()
+            deadline = time.monotonic() + 5
+            while not player.failure_held and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert player.failure_held
+            assert playlist.queue_list == [failed, offline]
+            assert playlist.history_list == []
+            player.skip()
+            deadline = time.monotonic() + 5
+            while not player._ready and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert player.current_track is offline and player._ready
+    finally:
+        player.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1)
 
 
 @pytest.mark.skipif(shutil.which("mpv") is None, reason="mpv is not installed")

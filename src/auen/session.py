@@ -256,6 +256,7 @@ class AuenSession:
             on_track_changed=self._track_changed,
             on_track_started=self._track_started,
             on_error=self._playback_error,
+            cancel_prepare=self._cancel_network,
         )
         self.player.set_volume(self.config.volume)
         self.player.start()
@@ -293,8 +294,11 @@ class AuenSession:
 
     def play_queued_now(self, index: int) -> Track | None:
         track = self.prioritize_queued(index)
-        if track is not None and self.player is not None and self.current_track is not None:
-            self.player.skip()
+        if track is not None and self.player is not None:
+            if self.current_track is not None:
+                self.player.skip()
+            else:
+                self.player.play()
         return track
 
     def save(self) -> None:
@@ -347,18 +351,22 @@ class AuenSession:
             previous.cached_path = None
             self._temporary_uris.discard(previous.uri)
         self.save()
-        if self.on_track_changed is not None:
+        if not self._closed and self.on_track_changed is not None:
             self.on_track_changed(track)
 
     def _track_started(self, track: Track) -> None:
         self.state.record_play(track, limit=self.config.history_limit)
-        if self.on_history_changed is not None:
+        if not self._closed and self.on_history_changed is not None:
             self.on_history_changed()
 
     def _playback_error(self, track: Track, error: Exception) -> None:
         self.save()
-        if self.on_playback_error is not None:
+        if not self._closed and self.on_playback_error is not None:
             self.on_playback_error(track, error)
+
+    def _cancel_network(self) -> None:
+        self.youtube.close()
+        self.downloads.cancel()
 
     def close(self) -> None:
         if self._closed:
@@ -376,6 +384,7 @@ class AuenSession:
 
         if self.player is not None:
             cleanup(self.player.close)
+        cleanup(self._cancel_network)
         cleanup(self.save)
         cleanup(lambda: self._search_executor.shutdown(wait=True, cancel_futures=True))
         cleanup(lambda: self._auto_cache_executor.shutdown(wait=True, cancel_futures=True))

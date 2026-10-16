@@ -30,13 +30,17 @@ class MpvBackend(AudioBackend):
         self._end_event = threading.Event()
         self._is_playing = False
         self._windows_media_option: bool | None = None
+        self._playback_error: str | None = None
+        self._stop_requested = threading.Event()
 
     def play(self, uri: str) -> None:
+        self._stop_requested.clear()
         with self._lock:
             if self._process:
                 self._kill_process()
 
             self._end_event.clear()
+            self._playback_error = None
 
             # Start mpv in idle mode to keep it alive or just play the file
             cmd = [
@@ -48,6 +52,7 @@ class MpvBackend(AudioBackend):
                 "--cache-pause-initial=yes",
                 "--cache-pause-wait=3",
                 "--demuxer-readahead-secs=30",
+                "--network-timeout=15",
                 f"--input-ipc-server={self._pipe_name if self._windows else self._socket_path}",
                 "--quiet",
                 "--",
@@ -63,6 +68,9 @@ class MpvBackend(AudioBackend):
             # Wait for socket
             start = time.monotonic()
             while not self._ipc_ready():
+                if self._stop_requested.is_set():
+                    self._kill_process()
+                    raise RuntimeError("mpv startup cancelled")
                 if self._process.poll() is not None:
                     self._process = None
                     raise RuntimeError("mpv exited before its control socket became available")
@@ -104,15 +112,19 @@ class MpvBackend(AudioBackend):
         if not self._windows:
             return self._socket_path.exists()
         try:
-            with WindowsPipe(self._pipe_name):
+            with WindowsPipe(self._pipe_name, timeout=0.1):
                 return True
         except OSError:
             return False
 
     def _monitor_process(self, process: subprocess.Popen[bytes]) -> None:
-        process.wait()
+        returncode = process.wait()
         with self._lock:
             if self._process is process:
+                if returncode != 0:
+                    self._playback_error = (
+                        f"mpv exited with code {returncode}. Check the media/connection and retry."
+                    )
                 self._process = None
                 self._is_playing = False
                 self._end_event.set()
@@ -132,6 +144,7 @@ class MpvBackend(AudioBackend):
                 self._process.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+                self._process.wait(timeout=1.0)
             self._process = None
 
         self._remove_socket()
@@ -192,6 +205,7 @@ class MpvBackend(AudioBackend):
             self._is_playing = True
 
     def stop(self) -> None:
+        self._stop_requested.set()
         with self._lock:
             self._kill_process()
             self._is_playing = False
@@ -202,21 +216,21 @@ class MpvBackend(AudioBackend):
             return PlaybackStatus(state=PlaybackState.STOPPED, volume=self._current_volume)
 
         # Get pause state
-        pause_resp = self._send_command(["get_property", "pause"])
+        pause_resp = self._get_property("pause")
         is_paused = pause_resp.get("data", False)
 
         state = PlaybackState.PAUSED if is_paused else PlaybackState.PLAYING
 
         # Get elapsed time
-        time_resp = self._send_command(["get_property", "time-pos"])
+        time_resp = self._get_property("time-pos")
         elapsed = float(time_resp.get("data", 0.0) or 0.0)
 
-        duration_resp = self._send_command(["get_property", "duration"])
+        duration_resp = self._get_property("duration")
         duration_data = duration_resp.get("data")
         duration = float(duration_data) if duration_data is not None else None
 
         # Get volume
-        vol_resp = self._send_command(["get_property", "volume"])
+        vol_resp = self._get_property("volume")
         vol_data = vol_resp.get("data")
         vol = self._current_volume if vol_data is None else int(vol_data)
         self._current_volume = vol
@@ -228,6 +242,13 @@ class MpvBackend(AudioBackend):
             volume=vol,
         )
 
+    def _get_property(self, name: str) -> dict[str, Any]:
+        response = self._send_command(["get_property", name])
+        if not response or response.get("error") not in {None, "success", "property unavailable"}:
+            # Do not repeat four slow IPC timeouts on every UI status tick.
+            raise RuntimeError("mpv control channel is unavailable")
+        return response
+
     def set_volume(self, level: int) -> None:
         self._current_volume = max(0, min(100, level))
         if self._process:
@@ -238,7 +259,10 @@ class MpvBackend(AudioBackend):
             self._send_command(["seek", seconds, "relative"])
 
     def wait_for_end(self, timeout: float | None = None) -> bool:
-        return self._end_event.wait(timeout)
+        ended = self._end_event.wait(timeout)
+        if ended and self._playback_error is not None:
+            raise RuntimeError(self._playback_error)
+        return ended
 
     @property
     def name(self) -> str:

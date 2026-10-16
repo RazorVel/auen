@@ -43,6 +43,9 @@ testing is distinct from those earlier reports.
    network access.
 7. If YouTube returns a bot challenge or HTTP 429, confirm the retry countdown appears and
    Offline playback remains available.
+8. A playback failure should hold Queue without discarding tracks. Space retries, `n` skips
+   explicitly, and Enter on a queued offline track plays without waiting for YouTube.
+   Quit during a stalled request and check prompt return plus Queue recovery after restart.
 
 ## Command mode and sleep
 

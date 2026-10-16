@@ -1,6 +1,6 @@
 # v1.2.0 release preparation checkpoint
 
-Updated: 2026-10-15 (Asia/Jakarta).
+Updated: 2026-10-16 (Asia/Jakarta).
 
 ## Goal
 
@@ -11,6 +11,10 @@ Check GitHub's Linux/Windows CI afterward; tagging and publication are not autho
 
 ## Current release preparation
 
+- Latest committed baseline is `4faf35b`; its Linux/Windows, Python 3.10/3.14 CI matrix
+  passed: https://github.com/RazorVel/auen/actions/runs/38736400011 . The network-hardening
+  changes described below are local and are not included in that CI result. No tag/release
+  has been created. Earlier CI repair records below are historical, not current failures.
 - Release commit `d4919a2` was pushed to origin/master before the user requested a pause.
   Its GitHub Actions run `38704439997` completed: Linux/Python 3.14 passed; both Windows jobs
   failed the mpv availability check, and Linux/Python 3.10 failed strict type checking.
@@ -346,31 +350,72 @@ Check GitHub's Linux/Windows CI afterward; tagging and publication are not autho
 2. Windows seek slider not exposed and hardware Stop not confirmed: keep both explicitly
    unverified. Android calls/audio focus/OEM battery limits remain broader coverage items.
    These are documented limits, not newly claimed passes.
-3. Commit and push the reviewed batch (authorized), then confirm GitHub's Linux/Windows CI.
-   Tagging needs further approval and release publication remains user-owned. No user data,
-   installed player, window-manager routing, or phone app was changed here.
+3. The previous release/CI batch was pushed and its full matrix passed. The user reported
+   passing all four requested Windows recovery checks on 2026-10-16 and authorized this
+   recovery batch's commit/push. Its fresh GitHub CI is the next gate at this checkpoint.
+   Tagging needs further approval and publication remains user-owned. No user data, installed
+   player, window-manager routing, or phone app was changed here.
 
-## Deferred playback/network report — after CI
+## Playback/network recovery — approved commit/push batch
 
 User report on Windows, possibly cross-platform: starting without the working VPN/network
 route can produce persistent playback failures. Auen then advances through every queued track
 until Queue is empty. Reconnecting and adding tracks may leave playback stuck, including
 after restarting; quitting eventually returns the shell but takes a long time.
 
-This report is queued for a separate troubleshooting/hardening pass, not implemented as part
-of the CI repair. Reproduce with controlled network/preparation failures; distinguish a true
-YouTube access block from OS/network permission failures. Investigate queue consumption,
-recovery after connectivity returns, persisted state, and bounded shutdown of in-flight work.
-The user prefers preserving the failed track/Queue and not skipping automatically by default.
-Observed symptoms are not a confirmed root cause. Do not tag/publish while this work is pending
-without resolving the release scope with the user.
+The user authorized a separate hardening pass. Confirmed shared causes: preparation/backend
+errors previously marked the failed track played and immediately consumed the next; search,
+stream resolution and downloads ran in thread pools without application-level cancellation
+or overall deadlines, and session.close joined those pools. mpv process exit codes were ignored.
+Synchronous worker-to-UI callbacks could also deadlock with UI-thread shutdown joining workers.
+The original Windows/VPN incident was not independently reproduced by the agent on hardware.
+On 2026-10-16 the user reported all requested live checks passing: failure preserves Queue,
+Space retries after connectivity returns, cached Queue Enter works while network playback
+is unavailable, and quitting stalled requests returns promptly with Queue preserved on restart.
+
+Implemented locally:
+
+- Playback errors prepend the failed track once, hold Queue and display recovery guidance.
+  Space/Play retries, explicit Next drops the failed entry, and Queue Enter or Library/History
+  Play Now releases the hold without discarding another track. Appending alone does not retry.
+  Failed preparation does not enter repeat/Previous history. Shuffle/repeat/duplicates survive.
+- Preparing tracks become owned session state before network work starts. Quit cancels work,
+  prevents late audio startup, and retains interrupted tracks in recovery state exactly once.
+- yt-dlp work runs in owned child processes with bounded metadata, socket/retry limits,
+  45-second lookup and 600-second download deadlines. Cancellation interrupts request pacing,
+  kills/reaps the owned worker tree and joins coordinating executors before closing cache/state.
+  Temporary partial downloads are cleaned; cancellation cannot register media after shutdown.
+  Existing anonymous-access cooldowns remain in force and are not bypassed on retry.
+- mpv nonzero exits are failures rather than natural EOF. Network inactivity is bounded at
+  15 seconds, startup Stop can interrupt waiting for IPC, killed mpv processes are reaped,
+  and status polling stops after the first transport failure rather than four serial timeouts.
+- Playback/history/download UI updates post without waiting for the UI thread. README plus
+  Windows/Termux checklists describe hold/retry/offline recovery; Windows user results are
+  recorded separately from automated tests. No new Termux-specific recovery pass is claimed.
+
+Verification: controlled tests cover failure hold, retries after recovery, cached/offline
+selection, duplicate preservation with Shuffle and every Repeat mode, saved Queue restart,
+quit during preparation, simultaneous stalled search/download/play preparation, process cleanup,
+request-spacing cancellation, real worker-module startup, and rendered Space/Next/Enter recovery.
+Real mpv against a local HTTP-403 fixture holds Queue and explicitly skips to a silent offline
+WAV. No YouTube requests or deliberate access blocks are used. Final complete suite: 457 passed
+in 58.62 seconds; Ruff clean; strict mypy clean for Linux (32 files including previews) and
+Windows (31 package files). Wheel/source build and isolated target installation passed;
+the installed copy reports 1.2.0, doctor checks pass (Android remains optional on Linux),
+phone-width headless open/quit works, and its real child-module entrypoint starts without
+warnings or network calls. The dedicated worker entrypoint avoids re-executing a module
+already imported by media package initialization. Test files/state exist only under
+`/tmp/auen-recovery-smoke.ypMQjP`; existing installations remain untouched. The user authorized
+commit/push after their Windows pass; old CI does not verify this recovery batch. Refreshed
+checksums are in `dist/SHA256SUMS-v1.2.0.txt`. Before committing, compare the wheel's Python
+modules with source; reuse the completed tests if runtime code remains unchanged.
 
 ## Resume
 
-Inspect `/home/razor/Repos/auen` status and the current release section above. Use the final
-wheel in `dist/` for the short user smoke, not an older installed v1.1.0/dev package. Reuse
-completed checks unless code changes. Keep Windows seek/Stop unverified. Verify asset checksums
-before release upload; do not silently replace the tested APK or regenerate signing credentials.
-The user approved commit/push. Inspect Git HEAD and its GitHub Actions run for the current
-publication state rather than interpreting this pre-commit checkpoint as a live status.
-Wait for further direction before tagging or publishing the release.
+This checkpoint records the state immediately before the approved recovery commit/push.
+Automated checks, packaging, installed-wheel smoke and the user's four Windows recovery
+checks are complete. Commit/push the reviewed batch, then verify its Linux/Windows CI matrix.
+Resolve current Git HEAD and GitHub Actions for the live commit/push/CI state; do not use the
+previous release batch's passing matrix as coverage of these changes. Keep Windows seek/Stop
+unverified. Do not change the tested APK or signing key. Tagging is not authorized and release
+publication remains user-owned.

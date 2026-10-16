@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from concurrent.futures import CancelledError
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -43,9 +44,11 @@ class YouTubeRequestGate:
         with self._lock:
             return max(0, math.ceil(self._cooldown_until - self._clock()))
 
-    def wait_turn(self) -> None:
+    def wait_turn(self, *, cancelled: threading.Event | None = None) -> None:
         """Wait for request spacing, or fail fast during a block cooldown."""
         with self._lock:
+            if cancelled is not None and cancelled.is_set():
+                raise CancelledError("YouTube request cancelled")
             remaining = self.remaining_seconds
             if remaining:
                 raise YouTubeCooldownError(
@@ -56,7 +59,10 @@ class YouTubeRequestGate:
             if self._last_started is not None:
                 delay = self.minimum_interval_seconds - (now - self._last_started)
                 if delay > 0:
-                    self._sleeper(delay)
+                    if cancelled is None:
+                        self._sleeper(delay)
+                    elif cancelled.wait(delay):
+                        raise CancelledError("YouTube request cancelled")
                     now = self._clock()
             self._last_started = now
 

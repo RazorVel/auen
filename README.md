@@ -89,6 +89,9 @@ See [Android setup](#install-on-android--termux) and the
 - Pace anonymous YouTube operations across search, streaming, and downloads. A bot challenge
   or HTTP 429 starts a short fail-fast cooldown shown in the Offline strip, while cached and
   local playback remain available.
+- Keep Queue intact on playback failure instead of skipping every track. Restore your
+  connection, then press Space to retry, `n` to skip explicitly, or Enter on another Queue
+  track to play it. Stalled YouTube work has deadlines and is cancelled when auen quits.
 - Get compact, view-specific key guidance at the bottom of the focused Results or Queue pane.
 - Preview and save themes, with an adaptive side-by-side or stacked phone-width layout.
 - Configure behavior through the TUI or scriptable `auen config` commands.

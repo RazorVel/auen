@@ -28,6 +28,27 @@ Use the checklist below for future release and regression validation.
 6. Restart and confirm remote control works again.
 7. Test cached playback with networking disabled and confirm no YouTube lookup is needed.
 
+## Network-failure recovery (v1.2.0 hardening)
+
+Use a naturally occurring failure or disconnect networking; do not repeatedly request a
+YouTube-blocked video to manufacture a block. Automated tests simulate stalled requests.
+
+1. Queue several tracks. If playback fails, the failed track and remaining Queue should stay
+   intact, with a Playback held notice; no chain of automatic skips or retries should occur.
+2. Restore the connection/VPN and press Space to retry. A genuine YouTube cooldown still
+   applies until its countdown expires; network restoration does not bypass access blocks.
+3. Alternatively, press `n` to skip the failed track, or select a cached track in Queue and
+   press Enter. Offline playback must not wait for YouTube access.
+4. Quit during a stalled search, stream preparation, or download. Audio should stop and the
+   shell should return promptly rather than waiting for network retries. Restart and check
+   that the interrupted track and remaining Queue survived without duplicate recovery entries.
+
+On 2026-10-16 the user reported passing all four requested Windows recovery checks with
+the rebuilt v1.2.0 wheel: Queue stays intact on failure, Space retries after connectivity
+returns, Enter plays a cached Queue track while network playback is unavailable, and quit
+during a stalled request returns promptly with Queue preserved after restart. These are
+user-reported device results, separate from the automated process-lifecycle simulations.
+
 ## UI and persistence
 
 1. Test Results, Queue, History (`h`), Playlists (`p`), and Offline (`l`).

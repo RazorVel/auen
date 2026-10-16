@@ -5,14 +5,12 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
-from yt_dlp.utils import DownloadError  # type: ignore[import-untyped]
-
+from auen.media.extractor import ExtractionError, Extractor
 from auen.media.youtube import (
     is_temporary_youtube_block,
     is_youtube_url,
@@ -45,6 +43,7 @@ class DownloadManager:
         self.cache = cache
         self.max_workers = max_workers
         self.request_gate = request_gate or YouTubeRequestGate()
+        self.extractor = Extractor()
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="auen-dl")
         self._lock = threading.RLock()
         self._inflight: dict[str, Future[CacheEntry]] = {}
@@ -57,7 +56,7 @@ class DownloadManager:
             raise ValueError("only YouTube tracks can be downloaded")
 
         with self._lock:
-            if self._closed:
+            if self._closed or self.extractor.cancelled.is_set():
                 raise RuntimeError("download manager is closed")
             if pinned:
                 self._pin_requests.add(track.uri)
@@ -88,10 +87,12 @@ class DownloadManager:
             with tempfile.TemporaryDirectory(prefix="download-", dir=temp_root) as temporary:
                 downloaded = self._download_file(track, Path(temporary))
                 destination = self.cache.destination_for(track, extension=downloaded.suffix)
-                os.replace(downloaded, destination)
                 with self._lock:
+                    if self.extractor.cancelled.is_set():
+                        raise CancelledError("Download cancelled")
                     pinned = track.uri in self._pin_requests
-                return self.cache.register(track, destination, pinned=pinned)
+                    os.replace(downloaded, destination)
+                    return self.cache.register(track, destination, pinned=pinned)
         except DownloadServiceError:
             raise
         except (OSError, ValueError) as exc:
@@ -109,12 +110,11 @@ class DownloadManager:
             "no_warnings": True,
         }
         try:
-            self.request_gate.wait_turn()
-            with YoutubeDL(options) as ydl:
-                ydl.extract_info(track.uri, download=True)
+            self.request_gate.wait_turn(cancelled=self.extractor.cancelled)
+            self.extractor.extract(track.uri, options, download=True, timeout=600.0)
         except YouTubeCooldownError as exc:
             raise DownloadServiceError(str(exc)) from exc
-        except DownloadError as exc:
+        except ExtractionError as exc:
             if is_temporary_youtube_block(exc):
                 remaining = self.request_gate.block()
                 raise DownloadServiceError(youtube_blocked_message(remaining)) from exc
@@ -148,7 +148,13 @@ class DownloadManager:
             if self._closed:
                 return
             self._closed = True
+        if cancel_pending:
+            self.cancel()
         self._executor.shutdown(wait=wait, cancel_futures=cancel_pending)
+
+    def cancel(self) -> None:
+        """Cancel running requests before joining any session workers."""
+        self.extractor.close()
 
     def __enter__(self) -> DownloadManager:
         return self

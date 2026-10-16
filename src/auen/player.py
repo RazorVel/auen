@@ -32,6 +32,7 @@ class PlaybackController:
         on_track_changed: TrackCallback | None = None,
         on_track_started: TrackStartedCallback | None = None,
         on_error: ErrorCallback | None = None,
+        cancel_prepare: Callable[[], None] | None = None,
     ) -> None:
         self.playlist = playlist
         self.backend = backend
@@ -39,6 +40,7 @@ class PlaybackController:
         self.on_track_changed = on_track_changed
         self.on_track_started = on_track_started
         self.on_error = on_error
+        self.cancel_prepare = cancel_prepare
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -55,6 +57,8 @@ class PlaybackController:
         self._previous_target: Track | None = None
         self._desired_paused = False
         self._stop_playback_requested = False
+        self._failed_track: Track | None = None
+        self._volume = 80
 
     def start(self) -> None:
         with self._lock:
@@ -77,12 +81,15 @@ class PlaybackController:
                 continue
 
             try:
+                self._set_current(track)
                 uri = self.prepare(track)
                 if not uri:
                     raise ValueError("track preparation returned no playable media")
-                self._set_current(track)
                 with self._control_lock:
-                    stopped = self._stop_playback_requested or not self._playback_enabled.is_set()
+                    stopped = (
+                        self._stop_event.is_set() or self._stop_playback_requested
+                        or not self._playback_enabled.is_set()
+                    )
                     if stopped:
                         self._stop_playback_requested = False
                         self.playlist.add_next(track)
@@ -94,9 +101,9 @@ class PlaybackController:
                 # Backend startup may take seconds. Keep the control lock free
                 # so Pause/Stop during preparation never blocks the UI loop.
                 self.backend.play(uri)
-                self.backend.set_volume(self.status.volume)
+                self.backend.set_volume(self._volume)
                 with self._control_lock:
-                    stopped = self._stop_playback_requested
+                    stopped = self._stop_event.is_set() or self._stop_playback_requested
                     if stopped:
                         self.backend.stop()
                     else:
@@ -106,11 +113,7 @@ class PlaybackController:
                 if not stopped and self.on_track_started is not None:
                     self.on_track_started(track)
             except Exception as exc:
-                with self._control_lock:
-                    self._ready = False
-                self.playlist.mark_played(track)
-                self._report_error(track, exc)
-                self._set_current(None)
+                self._hold_failed_track(track, exc)
                 continue
 
             ended = False
@@ -125,12 +128,15 @@ class PlaybackController:
                     break
 
             if self._stop_event.is_set():
+                self.playlist.add_next(track)
                 break
             with self._control_lock:
                 self._ready = False
                 previous_target = self._previous_target
                 self._previous_target = None
                 skipped = self._skip_requested.is_set()
+                if skipped:
+                    playback_error = None
                 stopped = self._stop_playback_requested
                 self._stop_playback_requested = False
                 if stopped:
@@ -149,16 +155,26 @@ class PlaybackController:
                 self._set_current(None)
                 continue
             if playback_error is not None:
-                with contextlib.suppress(Exception):
-                    self.backend.stop()
-                self.playlist.mark_played(track)
-                self._report_error(track, playback_error)
-                self._set_current(None)
-                self._apply_pending_hold()
+                self._hold_failed_track(track, playback_error)
                 continue
             self._set_current(None)
             if ended and not skipped:
                 self._apply_pending_hold()
+
+    def _hold_failed_track(self, track: Track, error: Exception) -> None:
+        with contextlib.suppress(Exception):
+            self.backend.stop()
+        with self._control_lock:
+            self._ready = False
+            self.playlist.add_next(track)
+            intentional_stop = self._stop_playback_requested or self._stop_event.is_set()
+            self._failed_track = None if intentional_stop else track
+            self._playback_enabled.clear()
+            self._hold_after_current.clear()
+        # Persist a queue containing the failed track, not both current + queued.
+        self._set_current(None)
+        if not intentional_stop:
+            self._report_error(track, error)
 
     @property
     def current_track(self) -> Track | None:
@@ -179,6 +195,7 @@ class PlaybackController:
 
     def resume(self) -> None:
         with self._control_lock:
+            self._failed_track = None
             self._desired_paused = False
             if self.current_track is None:
                 self._stop_playback_requested = False
@@ -202,6 +219,12 @@ class PlaybackController:
 
     def skip(self) -> None:
         with self._control_lock:
+            if self._failed_track is not None:
+                for index, track in enumerate(self.playlist.queue_list):
+                    if track is self._failed_track:
+                        self.playlist.remove(index)
+                        break
+                self._failed_track = None
             self._hold_after_current.clear()
             self._playback_enabled.set()
             if self._previous_target is None:
@@ -266,6 +289,11 @@ class PlaybackController:
     def queue_held(self) -> bool:
         return not self._playback_enabled.is_set()
 
+    @property
+    def failure_held(self) -> bool:
+        with self._control_lock:
+            return self._failed_track is not None and self.queue_held
+
     def _apply_pending_hold(self) -> None:
         if self._hold_after_current.is_set():
             self._hold_after_current.clear()
@@ -290,9 +318,12 @@ class PlaybackController:
         if not 0 <= level <= 100:
             raise ValueError("volume must be between 0 and 100")
         self.backend.set_volume(level)
+        self._volume = level
 
     def close(self, *, timeout: float = 3.0) -> None:
         self._stop_event.set()
+        if self.cancel_prepare is not None:
+            self.cancel_prepare()
         stop_error: Exception | None = None
         try:
             self.backend.stop()

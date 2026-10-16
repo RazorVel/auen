@@ -1,10 +1,10 @@
 """Tests for YouTube search and stream resolution."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from yt_dlp.utils import DownloadError
 
+from auen.media.extractor import ExtractionError
 from auen.media.youtube import (
     YouTubeService,
     YouTubeServiceError,
@@ -203,16 +203,12 @@ def test_bot_challenge_has_concise_actionable_error() -> None:
             cooldown_seconds=120,
         )
     )
-    extractor = MagicMock()
-    extractor.extract_info.side_effect = DownloadError(
-        "ERROR: [youtube] abc: Sign in to confirm you\u2019re not a bot. Use --cookies."
-    )
-
     with (
-        patch("auen.media.youtube.YoutubeDL") as youtube_dl,
+        patch.object(service.extractor, "extract", side_effect=ExtractionError(
+            "ERROR: [youtube] abc: Sign in to confirm you\u2019re not a bot. Use --cookies."
+        )) as extract,
         pytest.raises(YouTubeServiceError, match="temporarily blocked") as raised,
     ):
-        youtube_dl.return_value.__enter__.return_value = extractor
         service.search("blocked")
 
     assert "ERROR:" not in str(raised.value)
@@ -220,7 +216,7 @@ def test_bot_challenge_has_concise_actionable_error() -> None:
 
     with pytest.raises(YouTubeServiceError, match="cooling down"):
         service.search("blocked again")
-    assert extractor.extract_info.call_count == 1
+    assert extract.call_count == 1
 
 
 @pytest.mark.parametrize(
