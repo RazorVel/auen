@@ -72,6 +72,8 @@ def test_close_cancels_simultaneous_search_playback_and_download(tmp_path: Path)
     launched: list[subprocess.Popen] = []
 
     def launch(_command, **kwargs):
+        if _command[1:3] != ["-m", "auen.media.worker"]:
+            return original_popen(_command, **kwargs)
         process = original_popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
         launched.append(process)
         return process

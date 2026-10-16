@@ -410,6 +410,14 @@ commit/push after their Windows pass; old CI does not verify this recovery batch
 checksums are in `dist/SHA256SUMS-v1.2.0.txt`. Before committing, compare the wheel's Python
 modules with source; reuse the completed tests if runtime code remains unchanged.
 
+CI follow-up: recovery commit `a6f6f96` was pushed. Run `38908986540` passed both Linux jobs;
+Windows exposed a test harness issue: patching subprocess.Popen also replaced taskkill's
+launch with the fake stalled downloader. Narrowed interception to `auen.media.worker` only,
+delegating other commands to the real launcher. Added a real unrelated-command assertion;
+the Windows run must exercise genuine process cleanup. Production code/wheel/APK are unchanged.
+Focused extractor/session regressions: 18 passed in 1.82 seconds; Ruff clean. The follow-up
+GitHub matrix remains the verification gate at this checkpoint for this test-only fix.
+
 ## Resume
 
 This checkpoint records the state immediately before the approved recovery commit/push.

@@ -21,6 +21,8 @@ def test_stalled_extraction_is_bounded_and_reaps_child(tmp_path: Path, cancel: b
     entered = tmp_path / "entered"
 
     def launch(_command, **kwargs):
+        if _command[1:3] != ["-m", "auen.media.worker"]:
+            return original_popen(_command, **kwargs)
         process = original_popen([
             sys.executable, "-c",
             "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(30)",
@@ -42,6 +44,10 @@ def test_stalled_extraction_is_bounded_and_reaps_child(tmp_path: Path, cancel: b
                 with pytest.raises(CancelledError if cancel else ExtractionError):
                     future.result(timeout=3)
                 assert len(launched) == 1 and launched[0].poll() is not None
+                # Keep unrelated commands real, notably Windows taskkill used
+                # by production cleanup; do not turn them into stalled workers.
+                subprocess.run([sys.executable, "-c", "pass"], check=True, timeout=3)
+                assert len(launched) == 1
             finally:
                 runner.close()
         with pytest.raises(CancelledError):
@@ -54,7 +60,8 @@ def test_response_from_owned_process_is_read_and_worker_reaped() -> None:
     launched: list[subprocess.Popen] = []
 
     def launch(command, **kwargs):
-        assert command[1:3] == ["-m", "auen.media.worker"]
+        if command[1:3] != ["-m", "auen.media.worker"]:
+            return original_popen(command, **kwargs)
         process = original_popen([
             sys.executable, "-c",
             "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("
